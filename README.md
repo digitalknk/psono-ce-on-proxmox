@@ -198,7 +198,10 @@ sudo psonoctl stop
 sudo psonoctl restart
 sudo psonoctl logs -f
 sudo psonoctl config
+sudo psonoctl create-user username@example.com user@example.com
+sudo psonoctl promote-user username@example.com superuser
 sudo psonoctl test-email user@example.com
+sudo psonoctl clear-token
 sudo psonoctl backup
 sudo psonoctl update
 sudo psonoctl update --with-postgres
@@ -259,6 +262,12 @@ Cloudflare R2 uses restic's S3 backend:
 ```text
 s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<bucket>/<prefix>
 ```
+
+## Psono Maintenance
+
+The installer runs Psono database migrations during bootstrap and updates.
+
+It also creates a daily `psono-cleartoken.timer`, equivalent to Psono's documented `cleartoken` cron job.
 
 ## Files In The VM
 

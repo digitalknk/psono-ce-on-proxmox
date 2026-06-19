@@ -688,6 +688,34 @@ EOF_TAILSCALE_SERVICE
   systemctl enable --now psono-tailscale-exposure.service
 }
 
+configure_token_cleanup_timer() {
+  cat >/etc/systemd/system/psono-cleartoken.service <<'EOF_CLEARTOKEN_SERVICE'
+[Unit]
+Description=Clear expired Psono tokens
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/psonoctl clear-token
+EOF_CLEARTOKEN_SERVICE
+
+  cat >/etc/systemd/system/psono-cleartoken.timer <<'EOF_CLEARTOKEN_TIMER'
+[Unit]
+Description=Daily Psono token cleanup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF_CLEARTOKEN_TIMER
+
+  systemctl daemon-reload
+  systemctl enable --now psono-cleartoken.timer
+}
+
 main() {
   apt-get update
   apt-get install -y ca-certificates curl gnupg jq kmod lsb-release openssl qemu-guest-agent rsync sudo tar
@@ -697,6 +725,7 @@ main() {
   write_psono_env
   install_restic
   /usr/local/sbin/psonoctl bootstrap
+  configure_token_cleanup_timer
   if [[ "${ACCESS_MODE}" == "tailscale-https" ]]; then
     configure_tailscale_exposure_service
   elif [[ "${ACCESS_MODE}" == "caddy-https" ]]; then

@@ -30,6 +30,7 @@ Common commands:
   config                         Re-run the CE config wizard
   create-user                    Create a Psono user
   promote-user                   Promote a Psono user role
+  clear-token                    Remove expired Psono tokens
   backup                         Dump Postgres and save config files
   update                         Update Psono image, migrate DB, restart
 
@@ -42,6 +43,7 @@ Configuration:
   config                         Edit public URL, SMTP, YubiKey, registration
   create-user <username> <email> Create a Psono user and prompt for password
   promote-user <username> <role> Promote a user, for example superuser
+  clear-token                    Run Psono's cleartoken maintenance command
   test-email <address>           Send a Psono test email using current SMTP config
 
 Backup and restore:
@@ -67,6 +69,7 @@ Examples:
   psonoctl config
   psonoctl create-user username@example.com user@example.com
   psonoctl promote-user username@example.com superuser
+  psonoctl clear-token
   psonoctl test-email admin@example.com
   psonoctl backup
   psonoctl update
@@ -233,6 +236,15 @@ Promotes a Psono user through Docker Compose.
 
 Example:
   psonoctl promote-user username@example.com superuser
+USAGE
+      ;;
+    clear-token)
+      cat <<'USAGE'
+psonoctl clear-token
+
+Runs Psono's cleartoken maintenance command through Docker Compose.
+
+The installer also creates a daily systemd timer for this command.
 USAGE
       ;;
     ""|-h|--help|help)
@@ -542,7 +554,11 @@ wait_db() {
 }
 
 migrate() {
-  compose run --rm psono-combo python3 ./psono/manage.py migrate
+  manage_py migrate
+}
+
+manage_py() {
+  compose run --rm psono-combo python3 ./psono/manage.py "$@"
 }
 
 status_cmd() {
@@ -810,7 +826,7 @@ test_email_cmd() {
   require_install
   local target="${1:-}"
   [[ -n "${target}" ]] || die "test-email requires an address"
-  compose run --rm psono-combo python3 ./psono/manage.py sendtestmail "${target}"
+  manage_py sendtestmail "${target}"
 }
 
 create_user_cmd() {
@@ -820,7 +836,7 @@ create_user_cmd() {
   [[ -n "${email}" ]] || die "create-user requires an email address"
   password="$(prompt_secret "Password for ${username}")"
   [[ -n "${password}" ]] || die "Password is required"
-  compose run --rm psono-combo python3 ./psono/manage.py createuser "${username}" "${password}" "${email}"
+  manage_py createuser "${username}" "${password}" "${email}"
 }
 
 promote_user_cmd() {
@@ -828,7 +844,12 @@ promote_user_cmd() {
   local username="${1:-}" role="${2:-}"
   [[ -n "${username}" ]] || die "promote-user requires a username"
   [[ -n "${role}" ]] || die "promote-user requires a role, for example superuser"
-  compose run --rm psono-combo python3 ./psono/manage.py promoteuser "${username}" "${role}"
+  manage_py promoteuser "${username}" "${role}"
+}
+
+clear_token_cmd() {
+  require_install
+  manage_py cleartoken
 }
 
 bootstrap_cmd() {
@@ -859,6 +880,7 @@ main() {
     config) config_cmd "$@" ;;
     create-user) create_user_cmd "$@" ;;
     promote-user) promote_user_cmd "$@" ;;
+    clear-token) clear_token_cmd "$@" ;;
     test-email) test_email_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;
