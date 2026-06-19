@@ -38,6 +38,8 @@ TAILSCALE_EXPOSURE_ARG=""
 TAILSCALE_SSH_ARG=""
 CADDY_DOMAIN_ARG=""
 CADDY_EMAIL_ARG=""
+HARDENING_PROFILE_ARG=""
+SSH_EXPOSURE_ARG=""
 ALLOW_REGISTRATION_ARG=""
 SMTP_ENABLED_ARG=""
 SMTP_EMAIL_FROM_ARG=""
@@ -95,6 +97,8 @@ Access options:
   --tailscale-ssh true|false   Enable Tailscale SSH for the VM (default: false)
   --caddy-domain DOMAIN        Required for caddy-https
   --caddy-email EMAIL          Optional ACME email for Caddy
+  --hardening-profile PROFILE  none, minimal, balanced, or strict
+  --ssh-exposure MODE          lan, tailscale, or disabled
 
 Psono config options:
   --allow-registration true|false
@@ -215,6 +219,28 @@ prompt_choice() {
   done
 }
 
+prompt_hardening_profile() {
+  local label="$1" default="$2" value
+  while true; do
+    value="$(prompt "${label}" "${default}")"
+    case "${value}" in
+      none|minimal|balanced|strict) printf '%s\n' "${value}"; return ;;
+      *) echo "Enter none, minimal, balanced, or strict." >&2 ;;
+    esac
+  done
+}
+
+prompt_ssh_exposure() {
+  local label="$1" default="$2" value
+  while true; do
+    value="$(prompt "${label}" "${default}")"
+    case "${value}" in
+      lan|tailscale|disabled) printf '%s\n' "${value}"; return ;;
+      *) echo "Enter lan, tailscale, or disabled." >&2 ;;
+    esac
+  done
+}
+
 prompt_bool() {
   local label="$1" default="${2:-false}" value
   while true; do
@@ -284,6 +310,8 @@ parse_args() {
       --tailscale-ssh|--tailscale-ssh=*) TAILSCALE_SSH_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --caddy-domain|--caddy-domain=*) CADDY_DOMAIN_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --caddy-email|--caddy-email=*) CADDY_EMAIL_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --hardening-profile|--hardening-profile=*) HARDENING_PROFILE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --ssh-exposure|--ssh-exposure=*) SSH_EXPOSURE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --allow-registration|--allow-registration=*) ALLOW_REGISTRATION_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --smtp|--smtp=*) SMTP_ENABLED_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --smtp-from|--smtp-from=*) SMTP_EMAIL_FROM_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
@@ -329,6 +357,14 @@ parse_args() {
   case "${TAILSCALE_EXPOSURE_ARG}" in
     ""|serve|funnel) ;;
     *) die "--tailscale-exposure must be serve or funnel" ;;
+  esac
+  case "${HARDENING_PROFILE_ARG}" in
+    ""|none|minimal|balanced|strict) ;;
+    *) die "--hardening-profile must be none, minimal, balanced, or strict" ;;
+  esac
+  case "${SSH_EXPOSURE_ARG}" in
+    ""|lan|tailscale|disabled) ;;
+    *) die "--ssh-exposure must be lan, tailscale, or disabled" ;;
   esac
   case "${BACKUP_MODE_ARG}" in
     ""|none|r2|s3) ;;
@@ -485,6 +521,10 @@ write_psono_env() {
 ACCESS_MODE=${ACCESS_MODE@Q}
 PUBLIC_URL=${PUBLIC_URL@Q}
 ALLOWED_DOMAIN=${ALLOWED_DOMAIN@Q}
+VM_AUTH_METHOD=${VM_AUTH_METHOD@Q}
+HARDENING_PROFILE=${HARDENING_PROFILE@Q}
+SSH_EXPOSURE=${SSH_EXPOSURE@Q}
+TAILSCALE_SSH=${TAILSCALE_SSH@Q}
 ALLOW_REGISTRATION=${ALLOW_REGISTRATION@Q}
 SMTP_ENABLED=${SMTP_ENABLED@Q}
 SMTP_EMAIL_FROM=${SMTP_EMAIL_FROM@Q}
@@ -599,6 +639,38 @@ EOF_TIMER
   systemctl enable --now psono-backup.timer
 }
 
+check_disk_space() {
+  local required_gb=8 available_kb available_gb
+  available_kb="$(df -Pk / | awk 'NR == 2 {print $4}')"
+  available_gb="$((available_kb / 1024 / 1024))"
+  if (( available_gb < required_gb )); then
+    echo "At least ${required_gb} GB free disk space is required; only ${available_gb} GB is available." >&2
+    exit 1
+  fi
+}
+
+check_port_free() {
+  local port="$1"
+  if ss -H -ltn "( sport = :${port} )" | grep -q .; then
+    echo "Port ${port} is already listening. Free it before using caddy-https." >&2
+    exit 1
+  fi
+}
+
+validate_runtime_dependencies() {
+  command -v docker >/dev/null 2>&1 || { echo "docker is missing" >&2; exit 1; }
+  docker compose version >/dev/null 2>&1 || { echo "docker compose is missing" >&2; exit 1; }
+  if [[ "${ACCESS_MODE}" == "tailscale-https" ]]; then
+    command -v tailscale >/dev/null 2>&1 || { echo "tailscale is missing" >&2; exit 1; }
+  fi
+  if [[ "${ACCESS_MODE}" == "caddy-https" ]]; then
+    command -v caddy >/dev/null 2>&1 || { echo "caddy is missing" >&2; exit 1; }
+  fi
+  if [[ "${BACKUP_MODE}" != "none" ]]; then
+    command -v restic >/dev/null 2>&1 || { echo "restic is missing" >&2; exit 1; }
+  fi
+}
+
 configure_access() {
   case "${ACCESS_MODE}" in
     lab-http)
@@ -627,6 +699,8 @@ configure_access() {
       ;;
     caddy-https)
       PUBLIC_URL="https://${CADDY_DOMAIN}"
+      check_port_free 80
+      check_port_free 443
       install_caddy
       if [[ -n "${CADDY_EMAIL}" ]]; then
         cat >/etc/caddy/Caddyfile <<EOF_CADDY
@@ -635,12 +709,32 @@ configure_access() {
 }
 
 ${CADDY_DOMAIN} {
+  header {
+    X-Frame-Options "DENY"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "same-origin"
+    Content-Security-Policy "default-src 'self'; connect-src 'self' https://static.psono.com https://storage.googleapis.com https://*.s3.amazonaws.com https://*.digitaloceanspaces.com https://api.pwnedpasswords.com; font-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; form-action 'self'"
+  }
+  encode gzip zstd
+  request_body {
+    max_size 200MB
+  }
   reverse_proxy 127.0.0.1:10200
 }
 EOF_CADDY
       else
         cat >/etc/caddy/Caddyfile <<EOF_CADDY
 ${CADDY_DOMAIN} {
+  header {
+    X-Frame-Options "DENY"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "same-origin"
+    Content-Security-Policy "default-src 'self'; connect-src 'self' https://static.psono.com https://storage.googleapis.com https://*.s3.amazonaws.com https://*.digitaloceanspaces.com https://api.pwnedpasswords.com; font-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; form-action 'self'"
+  }
+  encode gzip zstd
+  request_body {
+    max_size 200MB
+  }
   reverse_proxy 127.0.0.1:10200
 }
 EOF_CADDY
@@ -718,18 +812,23 @@ EOF_CLEARTOKEN_TIMER
 
 main() {
   apt-get update
-  apt-get install -y ca-certificates curl gnupg jq kmod lsb-release openssl qemu-guest-agent rsync sudo tar
+  apt-get install -y ca-certificates curl gnupg jq kmod lsb-release openssl qemu-guest-agent rsync sudo tar iproute2
+  check_disk_space
   systemctl start qemu-guest-agent || true
   install_docker
   configure_access
   write_psono_env
   install_restic
+  validate_runtime_dependencies
   /usr/local/sbin/psonoctl bootstrap
   configure_token_cleanup_timer
   if [[ "${ACCESS_MODE}" == "tailscale-https" ]]; then
     configure_tailscale_exposure_service
   elif [[ "${ACCESS_MODE}" == "caddy-https" ]]; then
     systemctl reload caddy
+  fi
+  if [[ "${HARDENING_PROFILE}" != "none" ]]; then
+    /usr/local/sbin/psonoctl harden --profile "${HARDENING_PROFILE}" --ssh-exposure "${SSH_EXPOSURE}"
   fi
   /usr/local/sbin/psonoctl health || true
 }
@@ -845,8 +944,28 @@ main() {
     *) die "Unknown access mode: ${access_mode}" ;;
   esac
 
+  local hardening_profile ssh_exposure
+  if [[ -n "${HARDENING_PROFILE_ARG}" ]]; then
+    hardening_profile="${HARDENING_PROFILE_ARG}"
+  elif [[ -t 0 ]]; then
+    hardening_profile="$(prompt_hardening_profile "Hardening profile: none, minimal, balanced, strict" "balanced")"
+  else
+    hardening_profile="balanced"
+  fi
+
+  if [[ -n "${SSH_EXPOSURE_ARG}" ]]; then
+    ssh_exposure="${SSH_EXPOSURE_ARG}"
+  elif [[ "${tailscale_ssh}" == "true" ]]; then
+    ssh_exposure="tailscale"
+  else
+    ssh_exposure="lan"
+  fi
+  if [[ "${hardening_profile}" != "none" && -z "${SSH_EXPOSURE_ARG}" && -t 0 ]]; then
+    ssh_exposure="$(prompt_ssh_exposure "OpenSSH exposure: lan, tailscale, disabled" "${ssh_exposure}")"
+  fi
+
   local allow_registration smtp_enabled smtp_email_from smtp_host smtp_host_user smtp_host_password smtp_port smtp_use_tls smtp_use_ssl smtp_timeout
-  allow_registration="${ALLOW_REGISTRATION_ARG:-$(prompt_bool "Allow initial registration" "true")}"
+  allow_registration="${ALLOW_REGISTRATION_ARG:-$(prompt_bool "Allow initial registration" "false")}"
   smtp_enabled="${SMTP_ENABLED_ARG:-$(prompt_bool "Configure SMTP email" "false")}"
   smtp_email_from="${SMTP_EMAIL_FROM_ARG}"
   smtp_host="${SMTP_HOST_ARG}"
@@ -925,6 +1044,9 @@ main() {
     "$(shell_quote_line ACCESS_MODE "${access_mode}")" \
     "$(shell_quote_line PUBLIC_URL "${public_url}")" \
     "$(shell_quote_line ALLOWED_DOMAIN "${allowed_domain}")" \
+    "$(shell_quote_line VM_AUTH_METHOD "${auth_method}")" \
+    "$(shell_quote_line HARDENING_PROFILE "${hardening_profile}")" \
+    "$(shell_quote_line SSH_EXPOSURE "${ssh_exposure}")" \
     "$(shell_quote_line TAILSCALE_AUTH_KEY "${tailscale_auth_key}")" \
     "$(shell_quote_line TAILSCALE_HOSTNAME "${tailscale_hostname}")" \
     "$(shell_quote_line TAILSCALE_EXPOSURE "${tailscale_exposure}")" \

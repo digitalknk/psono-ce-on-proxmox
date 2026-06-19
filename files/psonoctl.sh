@@ -33,6 +33,8 @@ Common commands:
   clear-token                    Remove expired Psono tokens
   fix-email-salt                 Regenerate EMAIL_SECRET_SALT
   fingerprint                    Show local server key fingerprints
+  harden                         Apply VM hardening
+  doctor                         Check VM and Psono health
   backup                         Dump Postgres and save config files
   update                         Update Psono image, migrate DB, restart
 
@@ -48,6 +50,8 @@ Configuration:
   clear-token                    Run Psono's cleartoken maintenance command
   fix-email-salt                 Repair invalid bcrypt email secret salt
   fingerprint                    Show values used to verify first login
+  harden                         Apply firewall, SSH, update, and config hardening
+  doctor                         Report firewall, access, service, and backup state
   test-email <address>           Send a Psono test email using current SMTP config
 
 Backup and restore:
@@ -75,6 +79,8 @@ Examples:
   psonoctl promote-user username@example.com superuser
   psonoctl clear-token
   psonoctl fingerprint
+  psonoctl harden
+  psonoctl doctor
   psonoctl test-email admin@example.com
   psonoctl backup
   psonoctl update
@@ -274,6 +280,32 @@ Shows the local Psono server verify_key. Compare it with the fingerprint
 shown by Psono on first login.
 USAGE
       ;;
+    harden)
+      cat <<'USAGE'
+psonoctl harden [--profile none|minimal|balanced|strict] [--ssh-exposure lan|tailscale|disabled]
+
+Applies VM hardening, depending on profile:
+
+  - nftables inbound firewall
+  - OpenSSH root-login hardening
+  - unattended Debian security updates
+  - registration disabled for Psono unless later re-enabled
+
+SSH exposure:
+  lan        allow regular SSH on port 22 from the VM network
+  tailscale  allow regular SSH only through tailscale0
+  disabled  block regular SSH on port 22
+USAGE
+      ;;
+    doctor)
+      cat <<'USAGE'
+psonoctl doctor
+
+Reports the current access mode, listening ports, firewall state,
+Tailscale/Caddy status, disk space, Docker health, backup config,
+registration setting, and local Psono health.
+USAGE
+      ;;
     ""|-h|--help|help)
       usage
       ;;
@@ -449,7 +481,7 @@ render_settings() {
   fi
   local allowed_domain="${ALLOWED_DOMAIN:-$(public_host_from_url "${public_url}")}"
   local host_url="${public_url%/}/server"
-  local allow_registration="${ALLOW_REGISTRATION:-true}"
+  local allow_registration="${ALLOW_REGISTRATION:-false}"
   local allow_registration_json
   allow_registration_json="$(json_bool "${allow_registration}")"
   local smtp_enabled="${SMTP_ENABLED:-false}"
@@ -545,6 +577,8 @@ Psono is installed in ${PSONO_DIR} and managed with:
   sudo psonoctl status
   sudo psonoctl health
   sudo psonoctl logs -f
+  sudo psonoctl doctor
+  sudo psonoctl harden
   sudo psonoctl update
   sudo psonoctl backup
 
@@ -827,9 +861,21 @@ prompt_bool() {
 write_install_env() {
   : >"${INSTALL_ENV}"
   chmod 0600 "${INSTALL_ENV}"
-  for key in ACCESS_MODE PUBLIC_URL ALLOWED_DOMAIN ALLOW_REGISTRATION SMTP_ENABLED SMTP_EMAIL_FROM SMTP_HOST SMTP_HOST_USER SMTP_HOST_PASSWORD SMTP_PORT SMTP_USE_TLS SMTP_USE_SSL SMTP_TIMEOUT YUBIKEY_ENABLED YUBIKEY_CLIENT_ID YUBIKEY_SECRET_KEY; do
+  for key in ACCESS_MODE PUBLIC_URL ALLOWED_DOMAIN VM_AUTH_METHOD HARDENING_PROFILE SSH_EXPOSURE TAILSCALE_SSH ALLOW_REGISTRATION SMTP_ENABLED SMTP_EMAIL_FROM SMTP_HOST SMTP_HOST_USER SMTP_HOST_PASSWORD SMTP_PORT SMTP_USE_TLS SMTP_USE_SSL SMTP_TIMEOUT YUBIKEY_ENABLED YUBIKEY_CLIENT_ID YUBIKEY_SECRET_KEY; do
     printf "%s=%q\n" "${key}" "${!key:-}" >>"${INSTALL_ENV}"
   done
+}
+
+set_install_env_value() {
+  local key="$1" value="$2" tmp
+  mkdir -p "${STATE_DIR}"
+  tmp="$(mktemp)"
+  if [[ -f "${INSTALL_ENV}" ]]; then
+    awk -v key="${key}" 'index($0, key "=") != 1 { print }' "${INSTALL_ENV}" >"${tmp}"
+  fi
+  printf "%s=%q\n" "${key}" "${value}" >>"${tmp}"
+  install -m 0600 "${tmp}" "${INSTALL_ENV}"
+  rm -f "${tmp}"
 }
 
 config_cmd() {
@@ -839,7 +885,7 @@ config_cmd() {
 
   PUBLIC_URL="$(prompt "Public Psono URL" "${PUBLIC_URL:-http://$(primary_ip):10200}")"
   ALLOWED_DOMAIN="$(prompt "Allowed account domain" "${ALLOWED_DOMAIN:-$(public_host_from_url "${PUBLIC_URL}")}")"
-  ALLOW_REGISTRATION="$(prompt_bool "Allow registration? true/false" "${ALLOW_REGISTRATION:-true}")"
+  ALLOW_REGISTRATION="$(prompt_bool "Allow registration? true/false" "${ALLOW_REGISTRATION:-false}")"
 
   SMTP_ENABLED="$(prompt_bool "Configure SMTP email? true/false" "${SMTP_ENABLED:-false}")"
   if [[ "${SMTP_ENABLED}" == "true" ]]; then
@@ -948,6 +994,196 @@ fix_email_salt_cmd() {
   info "EMAIL_SECRET_SALT regenerated and settings.yaml updated"
 }
 
+validate_hardening_profile() {
+  case "${1:-}" in
+    none|minimal|balanced|strict) ;;
+    *) die "hardening profile must be none, minimal, balanced, or strict" ;;
+  esac
+}
+
+validate_ssh_exposure() {
+  case "${1:-}" in
+    lan|tailscale|disabled) ;;
+    *) die "SSH exposure must be lan, tailscale, or disabled" ;;
+  esac
+}
+
+install_hardening_packages() {
+  apt-get update
+  apt-get install -y nftables iproute2
+}
+
+configure_unattended_upgrades() {
+  apt-get install -y unattended-upgrades
+  cat >/etc/apt/apt.conf.d/20auto-upgrades <<'EOF_AUTO_UPGRADES'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF_AUTO_UPGRADES
+  systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
+}
+
+configure_sshd_hardening() {
+  local profile="$1" password_auth="yes"
+  mkdir -p /etc/ssh/sshd_config.d
+  if [[ "${profile}" == "strict" || "${VM_AUTH_METHOD:-password}" == "ssh-key" ]]; then
+    password_auth="no"
+  fi
+  cat >/etc/ssh/sshd_config.d/90-psono-hardening.conf <<EOF_SSHD
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication ${password_auth}
+KbdInteractiveAuthentication no
+X11Forwarding no
+EOF_SSHD
+  systemctl reload ssh >/dev/null 2>&1 || systemctl restart ssh >/dev/null 2>&1 || true
+}
+
+write_nftables_rules() {
+  local profile="$1" ssh_exposure="$2"
+  if [[ "${profile}" == "none" ]]; then
+    systemctl disable --now nftables >/dev/null 2>&1 || true
+    return
+  fi
+
+  local ssh_rule="" access_rule="" tailscale_rule=""
+  case "${ssh_exposure}" in
+    lan) ssh_rule="    tcp dport 22 accept" ;;
+    tailscale) ssh_rule="    iifname \"tailscale0\" tcp dport 22 accept" ;;
+    disabled) ssh_rule="" ;;
+  esac
+
+  case "${ACCESS_MODE:-lab-http}" in
+    lab-http) access_rule="    tcp dport 10200 accept" ;;
+    caddy-https) access_rule="    tcp dport { 80, 443 } accept" ;;
+    tailscale-https) tailscale_rule="    iifname \"tailscale0\" tcp dport 443 accept" ;;
+  esac
+
+  cat >/etc/nftables.conf <<EOF_NFTABLES
+#!/usr/sbin/nft -f
+flush ruleset
+
+table inet psono_hardening {
+  chain input {
+    type filter hook input priority 0;
+    policy drop;
+
+    iif "lo" accept
+    ct state established,related accept
+    ip protocol icmp accept
+    ip6 nexthdr icmpv6 accept
+    udp dport 41641 accept
+${tailscale_rule}
+${ssh_rule}
+${access_rule}
+  }
+
+  chain forward {
+    type filter hook forward priority 0;
+    policy accept;
+  }
+
+  chain output {
+    type filter hook output priority 0;
+    policy accept;
+  }
+}
+EOF_NFTABLES
+
+  nft -c -f /etc/nftables.conf
+  systemctl enable --now nftables
+  nft -f /etc/nftables.conf
+}
+
+harden_cmd() {
+  require_root
+  require_install
+  load_env_file "${INSTALL_ENV}"
+  local profile="${HARDENING_PROFILE:-balanced}" ssh_exposure="${SSH_EXPOSURE:-}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile) profile="${2:-}"; shift 2 ;;
+      --ssh-exposure) ssh_exposure="${2:-}"; shift 2 ;;
+      *) die "Unknown harden option: $1" ;;
+    esac
+  done
+  validate_hardening_profile "${profile}"
+  if [[ -z "${ssh_exposure}" ]]; then
+    if [[ "${TAILSCALE_SSH:-false}" == "true" ]]; then
+      ssh_exposure="tailscale"
+    else
+      ssh_exposure="lan"
+    fi
+  fi
+  validate_ssh_exposure "${ssh_exposure}"
+
+  set_install_env_value "HARDENING_PROFILE" "${profile}"
+  set_install_env_value "SSH_EXPOSURE" "${ssh_exposure}"
+  if [[ "${profile}" != "none" ]]; then
+    install_hardening_packages
+    configure_sshd_hardening "${profile}"
+    if [[ "${profile}" == "balanced" || "${profile}" == "strict" ]]; then
+      set_install_env_value "ALLOW_REGISTRATION" "false"
+      ALLOW_REGISTRATION="false"
+      render_config
+      compose up -d
+      configure_unattended_upgrades
+    fi
+  fi
+  write_nftables_rules "${profile}" "${ssh_exposure}"
+  info "Hardening profile '${profile}' applied with SSH exposure '${ssh_exposure}'"
+}
+
+status_line() {
+  local label="$1"
+  shift
+  printf '%-28s' "${label}:"
+  "$@" || true
+}
+
+unit_state() {
+  local unit="$1"
+  systemctl is-active "${unit}" 2>/dev/null || true
+}
+
+doctor_cmd() {
+  load_env_file "${INSTALL_ENV}"
+  echo "Psono doctor"
+  echo
+  printf '%-28s%s\n' "Access mode:" "${ACCESS_MODE:-unknown}"
+  printf '%-28s%s\n' "Public URL:" "${PUBLIC_URL:-unknown}"
+  printf '%-28s%s\n' "Hardening profile:" "${HARDENING_PROFILE:-unknown}"
+  printf '%-28s%s\n' "SSH exposure:" "${SSH_EXPOSURE:-unknown}"
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    printf '%-28s%s\n' "Client registration:" "$(jq -r '.allow_registration // "unknown"' "${CONFIG_FILE}" 2>/dev/null || echo unknown)"
+  fi
+  if [[ -f "${SETTINGS_FILE}" ]]; then
+    printf '%-28s%s\n' "Server registration:" "$(awk -F': *' '/^ALLOW_REGISTRATION:/ {print $2; exit}' "${SETTINGS_FILE}")"
+  fi
+  printf '%-28s%s\n' "Disk free /opt:" "$(df -h /opt 2>/dev/null | awk 'NR == 2 {print $4 " free of " $2}' || echo unknown)"
+  printf '%-28s%s\n' "Restic configured:" "$([[ -f "${RESTIC_ENV}" ]] && echo true || echo false)"
+  printf '%-28s%s\n' "nftables:" "$(unit_state nftables)"
+  printf '%-28s%s\n' "unattended-upgrades:" "$(unit_state unattended-upgrades)"
+  printf '%-28s%s\n' "tailscaled:" "$(unit_state tailscaled)"
+  printf '%-28s%s\n' "caddy:" "$(unit_state caddy)"
+  echo
+  echo "Listening TCP ports:"
+  ss -H -ltnp 2>/dev/null || true
+  echo
+  echo "Docker services:"
+  if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then
+    compose ps || true
+  else
+    echo "Psono Compose files are missing."
+  fi
+  echo
+  echo "Psono health:"
+  if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then
+    health_cmd || true
+  else
+    echo "Psono Compose files are missing."
+  fi
+}
+
 bootstrap_cmd() {
   require_root
   render_config
@@ -979,6 +1215,8 @@ main() {
     clear-token) clear_token_cmd "$@" ;;
     fix-email-salt) fix_email_salt_cmd "$@" ;;
     fingerprint) fingerprint_cmd "$@" ;;
+    harden) harden_cmd "$@" ;;
+    doctor) doctor_cmd "$@" ;;
     test-email) test_email_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;

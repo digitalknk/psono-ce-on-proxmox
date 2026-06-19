@@ -58,6 +58,8 @@ The installer asks for the VM ID, storage, network bridge, VM login method, acce
 
 By default it asks for a password for the `psono` user and enables password SSH in cloud-init. You can choose SSH key login instead and either provide a public key file or paste the public key when prompted.
 
+The installer also asks for a hardening profile. The recommended profile is `balanced`; it enables an inbound firewall, Debian security updates, SSH hardening, and disables open Psono registration.
+
 The login is rendered into the custom cloud-init user-data used by this installer.
 
 Multiple installs on the same Proxmox host are supported. Each install needs its own VMID and VM name. By default the script asks Proxmox for the next VMID and names the VM `psono-<VMID>`.
@@ -84,6 +86,7 @@ bash setup-psono-vm.sh \
   --auth-method password \
   --password 'change-this-password' \
   --access-mode lab-http \
+  --hardening-profile balanced \
   --backup-mode none
 ```
 
@@ -102,6 +105,7 @@ bash setup-psono-vm.sh \
   --access-mode tailscale-https \
   --tailscale-exposure serve \
   --tailscale-ssh false \
+  --ssh-exposure lan \
   --tailscale-auth-key tskey-auth-...
 ```
 
@@ -111,6 +115,18 @@ Tailscale public Funnel example:
 bash setup-psono-vm.sh \
   --access-mode tailscale-https \
   --tailscale-exposure funnel \
+  --hardening-profile balanced \
+  --tailscale-auth-key tskey-auth-...
+```
+
+Tailscale SSH example:
+
+```bash
+bash setup-psono-vm.sh \
+  --access-mode tailscale-https \
+  --tailscale-exposure serve \
+  --tailscale-ssh true \
+  --ssh-exposure tailscale \
   --tailscale-auth-key tskey-auth-...
 ```
 
@@ -150,6 +166,14 @@ This installer uses a full VM, not an LXC container. You do not need to enable a
 
 Tailscale SSH is optional and defaults to off. If enabled, the installer runs `tailscale up --ssh` so the VM can be reached through Tailscale SSH according to your tailnet's access controls.
 
+With hardening enabled, regular OpenSSH access is controlled separately with `--ssh-exposure`:
+
+- `lan`: allow port 22 from the VM network.
+- `tailscale`: allow port 22 only through `tailscale0`.
+- `disabled`: block regular port 22 access.
+
+The Proxmox console remains the break-glass login path.
+
 To create an auth key:
 
 1. Open the Tailscale admin console.
@@ -173,6 +197,35 @@ Installs Caddy and reverse proxies your domain to:
 ```
 
 Use this when the VM can receive traffic for the domain and Caddy can complete ACME validation.
+
+Caddy mode includes basic security headers and keeps Psono bound to `127.0.0.1:10200` behind the reverse proxy.
+
+## Hardening
+
+Hardening profiles:
+
+- `none`: do not apply VM hardening.
+- `minimal`: apply the firewall and SSH hardening.
+- `balanced`: recommended; applies firewall, SSH hardening, unattended security updates, and disables public Psono registration.
+- `strict`: like balanced, and disables password SSH in the VM.
+
+The firewall uses `nftables`:
+
+- default inbound deny
+- loopback, established traffic, ICMP, outbound traffic allowed
+- Tailscale UDP and selected Tailscale HTTPS/SSH traffic allowed
+- `lab-http`: opens `10200/tcp`
+- `caddy-https`: opens `80/tcp` and `443/tcp`
+- `tailscale-https`: opens no LAN Psono port
+
+For an existing VM:
+
+```bash
+sudo psonoctl harden --profile balanced --ssh-exposure tailscale
+sudo psonoctl doctor
+```
+
+This installer does not add Watchtower. Use `sudo psonoctl update` so backups, migrations, and health checks run in the intended order.
 
 ## Optional Setup
 
@@ -204,6 +257,8 @@ sudo psonoctl test-email user@example.com
 sudo psonoctl clear-token
 sudo psonoctl fix-email-salt
 sudo psonoctl fingerprint
+sudo psonoctl harden
+sudo psonoctl doctor
 sudo psonoctl backup
 sudo psonoctl update
 sudo psonoctl update --with-postgres
@@ -227,6 +282,8 @@ That command:
 5. Starts Psono again.
 6. Checks the local health endpoint.
 7. Prunes old images after the health check passes.
+
+This installer intentionally does not use Watchtower or automatic container updates. Psono updates are not just image pulls: the app container should be stopped at the right point, database migrations need to run, the service needs a health check before cleanup, and PostgreSQL updates must stay within the pinned major version unless you explicitly run a major upgrade. `psonoctl update` keeps that order visible and recoverable.
 
 Update the PostgreSQL patch image within the same major version:
 
