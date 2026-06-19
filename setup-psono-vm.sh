@@ -35,6 +35,7 @@ ACCESS_MODE_ARG=""
 TAILSCALE_AUTH_KEY_ARG=""
 TAILSCALE_HOSTNAME_ARG=""
 TAILSCALE_EXPOSURE_ARG=""
+TAILSCALE_SSH_ARG=""
 CADDY_DOMAIN_ARG=""
 CADDY_EMAIL_ARG=""
 ALLOW_REGISTRATION_ARG=""
@@ -91,6 +92,7 @@ Access options:
   --tailscale-auth-key KEY     Optional auth key from Tailscale admin console
   --tailscale-hostname NAME    Tailscale hostname (default: VM name)
   --tailscale-exposure MODE    serve or funnel (default: serve)
+  --tailscale-ssh true|false   Enable Tailscale SSH for the VM (default: false)
   --caddy-domain DOMAIN        Required for caddy-https
   --caddy-email EMAIL          Optional ACME email for Caddy
 
@@ -279,6 +281,7 @@ parse_args() {
       --tailscale-auth-key|--tailscale-auth-key=*) TAILSCALE_AUTH_KEY_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --tailscale-hostname|--tailscale-hostname=*) TAILSCALE_HOSTNAME_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --tailscale-exposure|--tailscale-exposure=*) TAILSCALE_EXPOSURE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --tailscale-ssh|--tailscale-ssh=*) TAILSCALE_SSH_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --caddy-domain|--caddy-domain=*) CADDY_DOMAIN_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --caddy-email|--caddy-email=*) CADDY_EMAIL_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --allow-registration|--allow-registration=*) ALLOW_REGISTRATION_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
@@ -314,6 +317,7 @@ parse_args() {
   validate_bool "--smtp-use-tls" "${SMTP_USE_TLS_ARG}"
   validate_bool "--smtp-use-ssl" "${SMTP_USE_SSL_ARG}"
   validate_bool "--yubikey" "${YUBIKEY_ENABLED_ARG}"
+  validate_bool "--tailscale-ssh" "${TAILSCALE_SSH_ARG}"
   case "${AUTH_METHOD_ARG}" in
     ""|password|ssh-key) ;;
     *) die "--auth-method must be password or ssh-key" ;;
@@ -548,11 +552,17 @@ configure_access() {
       ;;
     tailscale-https)
       install_tailscale
+      local tailscale_up_args
+      tailscale_up_args=(--hostname "${TAILSCALE_HOSTNAME}" --accept-dns=true)
+      if [[ "${TAILSCALE_SSH}" == "true" ]]; then
+        tailscale_up_args+=(--ssh)
+      fi
       if [[ -n "${TAILSCALE_AUTH_KEY}" ]]; then
-        tailscale up --auth-key "${TAILSCALE_AUTH_KEY}" --hostname "${TAILSCALE_HOSTNAME}" --accept-dns=true
+        tailscale_up_args+=(--auth-key "${TAILSCALE_AUTH_KEY}")
+        tailscale up "${tailscale_up_args[@]}"
       else
         echo "No Tailscale auth key supplied. Open the login URL printed below to continue setup."
-        tailscale up --hostname "${TAILSCALE_HOSTNAME}" --accept-dns=true
+        tailscale up "${tailscale_up_args[@]}"
       fi
       local ts_name
       ts_name="$(tailscale status --json | jq -r '.Self.DNSName | sub("\\.$"; "")')"
@@ -708,7 +718,7 @@ main() {
   image_dir="/var/lib/vz/template/qcow2"
   image_path="${image_dir}/$(basename "${image_url}")"
 
-  local access_mode public_url allowed_domain tailscale_auth_key tailscale_hostname tailscale_exposure caddy_domain caddy_email
+  local access_mode public_url allowed_domain tailscale_auth_key tailscale_hostname tailscale_exposure tailscale_ssh caddy_domain caddy_email
   if [[ -z "${ACCESS_MODE_ARG}" ]]; then
     echo "Access modes: lab-http, tailscale-https, caddy-https"
   fi
@@ -718,6 +728,7 @@ main() {
   tailscale_auth_key="${TAILSCALE_AUTH_KEY_ARG}"
   tailscale_hostname="${TAILSCALE_HOSTNAME_ARG:-${vm_name}}"
   tailscale_exposure="${TAILSCALE_EXPOSURE_ARG:-serve}"
+  tailscale_ssh="${TAILSCALE_SSH_ARG:-false}"
   caddy_domain="${CADDY_DOMAIN_ARG}"
   caddy_email="${CADDY_EMAIL_ARG}"
   case "${access_mode}" in
@@ -731,6 +742,7 @@ main() {
       fi
       [[ -n "${TAILSCALE_HOSTNAME_ARG}" ]] || tailscale_hostname="$(prompt "Tailscale hostname" "${vm_name}")"
       [[ -n "${TAILSCALE_EXPOSURE_ARG}" ]] || tailscale_exposure="$(prompt "Tailscale exposure: serve or funnel" "serve")"
+      [[ -n "${TAILSCALE_SSH_ARG}" ]] || tailscale_ssh="$(prompt_bool "Enable Tailscale SSH for this VM" "false")"
       case "${tailscale_exposure}" in
         serve|funnel) ;;
         *) die "Tailscale exposure must be serve or funnel" ;;
@@ -829,6 +841,7 @@ main() {
     "$(shell_quote_line TAILSCALE_AUTH_KEY "${tailscale_auth_key}")" \
     "$(shell_quote_line TAILSCALE_HOSTNAME "${tailscale_hostname}")" \
     "$(shell_quote_line TAILSCALE_EXPOSURE "${tailscale_exposure}")" \
+    "$(shell_quote_line TAILSCALE_SSH "${tailscale_ssh}")" \
     "$(shell_quote_line CADDY_DOMAIN "${caddy_domain}")" \
     "$(shell_quote_line CADDY_EMAIL "${caddy_email}")" \
     "$(shell_quote_line ALLOW_REGISTRATION "${allow_registration}")" \

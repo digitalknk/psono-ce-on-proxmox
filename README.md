@@ -99,6 +99,7 @@ Tailscale tailnet-only example:
 bash setup-psono-vm.sh \
   --access-mode tailscale-https \
   --tailscale-exposure serve \
+  --tailscale-ssh false \
   --tailscale-auth-key tskey-auth-...
 ```
 
@@ -144,6 +145,8 @@ The installer asks for a Tailscale auth key. You can leave it blank and finish t
 In Tailscale mode Psono listens only on `127.0.0.1:10200`.
 
 This installer uses a full VM, not an LXC container. You do not need to enable a Proxmox-side TUN device for the guest. The VM has its own kernel, and the bootstrap checks `/dev/net/tun` inside Debian before starting Tailscale.
+
+Tailscale SSH is optional and defaults to off. If enabled, the installer runs `tailscale up --ssh` so the VM can be reached through Tailscale SSH according to your tailnet's access controls.
 
 To create an auth key:
 
