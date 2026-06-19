@@ -10,6 +10,7 @@ Status: early homelab installer. Read the script before running it on a Proxmox 
 
 - Debian 13 VM
 - 2 vCPU, 4096 MB RAM, 40 GB disk by default
+- VM name `psono-<VMID>` by default
 - Docker and Docker Compose inside the VM
 - `psono/psono-combo:latest`
 - `postgres:18-alpine`
@@ -54,6 +55,16 @@ bash setup-psono-vm.sh
 ```
 
 The installer asks for the VM ID, storage, network bridge, access mode, and optional features.
+
+Multiple installs on the same Proxmox host are supported. Each install needs its own VMID and VM name. By default the script asks Proxmox for the next VMID and names the VM `psono-<VMID>`.
+
+The Debian cloud image is cached under:
+
+```text
+/var/lib/vz/template/qcow2/
+```
+
+If the same image file already exists there, the installer reuses it instead of downloading it again. Pass `--refresh-image` to download a fresh copy, or `--image-url` to use a different image URL.
 
 Most prompts can be prefilled with flags. For example:
 

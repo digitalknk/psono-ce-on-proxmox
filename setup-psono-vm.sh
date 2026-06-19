@@ -7,7 +7,6 @@ PSONOCTL_FILE="${SCRIPT_DIR}/files/psonoctl.sh"
 PSONO_INSTALLER_BASE_URL="${PSONO_INSTALLER_BASE_URL:-}"
 
 DEFAULT_IMAGE_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
-DEFAULT_VM_NAME="psono"
 DEFAULT_CORES="2"
 DEFAULT_MEMORY="4096"
 DEFAULT_DISK_GB="40"
@@ -23,6 +22,7 @@ STORAGE_ARG=""
 SNIPPET_STORAGE_ARG=""
 SSH_KEY_FILE_ARG=""
 IMAGE_URL_ARG=""
+REFRESH_IMAGE_ARG="false"
 ACCESS_MODE_ARG=""
 TAILSCALE_AUTH_KEY_ARG=""
 TAILSCALE_HOSTNAME_ARG=""
@@ -64,7 +64,7 @@ Usage:
 
 VM options:
   --vmid ID                    VMID to create (default: next Proxmox ID)
-  --name NAME                  VM name (default: psono)
+  --name NAME                  VM name (default: psono-<VMID>)
   --cores N                    vCPU count (default: 2)
   --memory MB                  RAM in MB (default: 4096)
   --disk GB                    Disk size in GB (default: 40)
@@ -73,6 +73,7 @@ VM options:
   --snippet-storage NAME       Cloud-init snippet storage (default: local)
   --ssh-key PATH               SSH public key file
   --image-url URL              Debian cloud image URL
+  --refresh-image              Download image again even if cached locally
 
 Access options:
   --access-mode MODE           lab-http, tailscale-https, or caddy-https
@@ -113,6 +114,8 @@ Backup modes:
 Notes:
   Run as root on a Proxmox host.
   Any omitted option is prompted for interactively.
+  Existing VMIDs and VM names are refused before creation.
+  The Debian image is reused when the same file already exists locally.
 USAGE
 }
 
@@ -227,6 +230,7 @@ parse_args() {
       --snippet-storage|--snippet-storage=*) SNIPPET_STORAGE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --ssh-key|--ssh-key=*) SSH_KEY_FILE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --image-url|--image-url=*) IMAGE_URL_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --refresh-image) REFRESH_IMAGE_ARG="true"; shift ;;
       --access-mode|--access-mode=*) ACCESS_MODE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --tailscale-auth-key|--tailscale-auth-key=*) TAILSCALE_AUTH_KEY_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --tailscale-hostname|--tailscale-hostname=*) TAILSCALE_HOSTNAME_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
@@ -301,6 +305,14 @@ next_vmid() {
   pvesh get /cluster/nextid
 }
 
+vm_exists() {
+  qm status "$1" >/dev/null 2>&1
+}
+
+vm_name_exists() {
+  qm list | awk 'NR > 1 {print $2}' | grep -Fxq "$1"
+}
+
 storage_exists() {
   pvesm status | awk 'NR > 1 {print $1}' | grep -qx "$1"
 }
@@ -324,17 +336,19 @@ render_template() {
 }
 
 download_image() {
-  local image_url="$1" image_path="$2"
-  if [[ -f "${image_path}" ]]; then
+  local image_url="$1" image_path="$2" refresh_image="$3" tmp_path
+  if [[ -f "${image_path}" && "${refresh_image}" != "true" ]]; then
     info "Using existing image ${image_path}"
     return
   fi
+  tmp_path="${image_path}.tmp.$$"
   info "Downloading Debian cloud image"
   if command -v curl >/dev/null 2>&1; then
-    curl -fL "${image_url}" -o "${image_path}"
+    curl -fL "${image_url}" -o "${tmp_path}" || { rm -f "${tmp_path}"; return 1; }
   else
-    wget -O "${image_path}" "${image_url}"
+    wget -O "${tmp_path}" "${image_url}" || { rm -f "${tmp_path}"; return 1; }
   fi
+  mv "${tmp_path}" "${image_path}"
 }
 
 make_bootstrap_script() {
@@ -582,7 +596,9 @@ main() {
 
   local vmid vm_name cores memory disk_gb bridge storage snippet_storage ssh_key_file image_url image_dir image_path
   vmid="${VMID_ARG:-$(prompt "VMID" "$(next_vmid)")}"
-  vm_name="${VM_NAME_ARG:-$(prompt "VM name" "${DEFAULT_VM_NAME}")}"
+  vm_exists "${vmid}" && die "VMID already exists: ${vmid}"
+  vm_name="${VM_NAME_ARG:-$(prompt "VM name" "psono-${vmid}")}"
+  vm_name_exists "${vm_name}" && die "VM name already exists: ${vm_name}"
   cores="${CORES_ARG:-$(prompt "vCPU cores" "${DEFAULT_CORES}")}"
   memory="${MEMORY_ARG:-$(prompt "Memory MB" "${DEFAULT_MEMORY}")}"
   disk_gb="${DISK_GB_ARG:-$(prompt "Disk GB" "${DEFAULT_DISK_GB}")}"
@@ -743,7 +759,7 @@ main() {
   install -m 0600 "${user_data_file}" "${snippet_file}"
 
   mkdir -p "${image_dir}"
-  download_image "${image_url}" "${image_path}"
+  download_image "${image_url}" "${image_path}" "${REFRESH_IMAGE_ARG}"
 
   info "Creating VM ${vmid} (${vm_name})"
   qm create "${vmid}" \
