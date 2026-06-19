@@ -347,7 +347,9 @@ indent_block() {
 
 write_b64_file_block() {
   local input="$1" output="$2"
-  base64 -w 0 "${input}" | fold -w 76 | indent_block >"${output}"
+  base64 -w 0 "${input}" | fold -w 76 | while IFS= read -r line || [[ -n "${line}" ]]; do
+    printf '      %s\n' "${line}"
+  done >"${output}"
 }
 
 next_vmid() {
