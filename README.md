@@ -203,6 +203,7 @@ sudo psonoctl promote-user username@example.com superuser
 sudo psonoctl test-email user@example.com
 sudo psonoctl clear-token
 sudo psonoctl fix-email-salt
+sudo psonoctl fingerprint
 sudo psonoctl backup
 sudo psonoctl update
 sudo psonoctl update --with-postgres
@@ -271,6 +272,8 @@ The installer runs Psono database migrations during bootstrap and updates.
 It also creates a daily `psono-cleartoken.timer`, equivalent to Psono's documented `cleartoken` cron job.
 
 If user creation fails with `Invalid salt`, update `psonoctl` and run `sudo psonoctl fix-email-salt`.
+
+On first login, Psono may ask you to approve a server fingerprint. Verify it from the VM with `sudo psonoctl fingerprint`; the login screen should match the local `verify_key`.
 
 ## Files In The VM
 

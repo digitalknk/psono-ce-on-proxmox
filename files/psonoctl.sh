@@ -32,6 +32,7 @@ Common commands:
   promote-user                   Promote a Psono user role
   clear-token                    Remove expired Psono tokens
   fix-email-salt                 Regenerate EMAIL_SECRET_SALT
+  fingerprint                    Show local server key fingerprints
   backup                         Dump Postgres and save config files
   update                         Update Psono image, migrate DB, restart
 
@@ -46,6 +47,7 @@ Configuration:
   promote-user <username> <role> Promote a user, for example superuser
   clear-token                    Run Psono's cleartoken maintenance command
   fix-email-salt                 Repair invalid bcrypt email secret salt
+  fingerprint                    Show values used to verify first login
   test-email <address>           Send a Psono test email using current SMTP config
 
 Backup and restore:
@@ -72,6 +74,7 @@ Examples:
   psonoctl create-user user@example.com
   psonoctl promote-user username@example.com superuser
   psonoctl clear-token
+  psonoctl fingerprint
   psonoctl test-email admin@example.com
   psonoctl backup
   psonoctl update
@@ -261,6 +264,14 @@ psonoctl fix-email-salt
 
 Regenerates EMAIL_SECRET_SALT as a bcrypt salt, re-renders settings.yaml,
 and restarts Psono. Use this if user creation fails with "Invalid salt".
+USAGE
+      ;;
+    fingerprint)
+      cat <<'USAGE'
+psonoctl fingerprint
+
+Shows the local Psono server verify_key. Compare it with the fingerprint
+shown by Psono on first login.
 USAGE
       ;;
     ""|-h|--help|help)
@@ -886,6 +897,45 @@ clear_token_cmd() {
   manage_py cleartoken
 }
 
+fingerprint_cmd() {
+  require_install
+  local public_key info_json verify_key
+
+  info_json="$(curl -fsS "http://127.0.0.1:10200/server/info/" 2>/dev/null || true)"
+  if [[ -n "${info_json}" ]]; then
+    verify_key="$(printf '%s' "${info_json}" | jq -r '.verify_key // empty' 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${verify_key:-}" ]]; then
+    echo "Server verify_key:"
+    printf '%s\n' "${verify_key}"
+    echo
+    echo "Compare this value with the fingerprint shown on the Psono login screen."
+    echo
+  else
+    echo "Could not read verify_key from http://127.0.0.1:10200/server/info/"
+    echo
+  fi
+
+  echo "Settings file: ${SETTINGS_FILE}"
+  public_key="$(awk -F': *' '/^PUBLIC_KEY:/ {gsub(/^'\''|'\''$/, "", $2); print $2; exit}' "${SETTINGS_FILE}")"
+  if [[ -n "${public_key}" ]]; then
+    echo "PUBLIC_KEY:"
+    printf '%s\n' "${public_key}"
+    echo
+    echo "Common public key hashes:"
+    printf '%s' "${public_key}" | sha256sum | awk '{print "sha256(public_key): " $1}'
+    printf '%s' "${public_key}" | sha512sum | awk '{print "sha512(public_key): " $1}'
+  else
+    echo "Could not read PUBLIC_KEY from ${SETTINGS_FILE}"
+  fi
+  echo
+  echo "Local server info endpoint:"
+  if [[ -n "${info_json}" ]]; then
+    printf '%s' "${info_json}" | jq . || printf '%s\n' "${info_json}"
+  fi
+}
+
 fix_email_salt_cmd() {
   require_root
   require_install
@@ -928,6 +978,7 @@ main() {
     promote-user) promote_user_cmd "$@" ;;
     clear-token) clear_token_cmd "$@" ;;
     fix-email-salt) fix_email_salt_cmd "$@" ;;
+    fingerprint) fingerprint_cmd "$@" ;;
     test-email) test_email_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;
