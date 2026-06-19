@@ -689,7 +689,7 @@ EOF_TAILSCALE_SERVICE
 main() {
   apt-get update
   apt-get install -y ca-certificates curl gnupg jq kmod lsb-release openssl qemu-guest-agent rsync sudo tar
-  systemctl enable --now qemu-guest-agent
+  systemctl start qemu-guest-agent || true
   install_docker
   configure_access
   write_psono_env

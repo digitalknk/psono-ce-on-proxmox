@@ -24,7 +24,7 @@ __BOOTSTRAP_B64__
 __PSONOCTL_B64__
 
 runcmd:
-  - [systemctl, enable, --now, qemu-guest-agent]
+  - [bash, -lc, "systemctl start qemu-guest-agent || true"]
   - [bash, /root/bootstrap-psono.sh]
 
 final_message: "Psono bootstrap finished. Check /var/log/psono-bootstrap.log and run: sudo psonoctl status"
