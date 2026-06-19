@@ -809,7 +809,8 @@ main() {
   qm set "${vmid}" --ipconfig0 ip=dhcp
   qm set "${vmid}" --cicustom "user=${snippet_storage}:snippets/${user_data_name}"
   if [[ -f "${ssh_key_file}" ]]; then
-    qm set "${vmid}" --sshkeys "$(cat "${ssh_key_file}")"
+    info "Installing SSH public key from ${ssh_key_file}"
+    qm set "${vmid}" --sshkeys "${ssh_key_file}"
   else
     echo "No SSH key installed. Use the Proxmox console if needed." >&2
   fi
