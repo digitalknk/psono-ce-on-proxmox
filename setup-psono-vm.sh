@@ -417,11 +417,27 @@ install_docker() {
 }
 
 install_tailscale() {
+  ensure_tun_device
   if command -v tailscale >/dev/null 2>&1; then
     return
   fi
   curl -fsSL https://tailscale.com/install.sh | sh
   systemctl enable --now tailscaled
+}
+
+ensure_tun_device() {
+  mkdir -p /dev/net
+  if [[ ! -c /dev/net/tun ]]; then
+    modprobe tun || true
+  fi
+  if [[ ! -c /dev/net/tun ]]; then
+    mknod /dev/net/tun c 10 200
+    chmod 0666 /dev/net/tun
+  fi
+  [[ -c /dev/net/tun ]] || {
+    echo "Tailscale requires /dev/net/tun inside the VM. Check the guest kernel and module support." >&2
+    exit 1
+  }
 }
 
 install_caddy() {
@@ -563,7 +579,7 @@ EOF_TAILSCALE_SERVICE
 
 main() {
   apt-get update
-  apt-get install -y ca-certificates curl gnupg jq lsb-release openssl qemu-guest-agent rsync tar
+  apt-get install -y ca-certificates curl gnupg jq kmod lsb-release openssl qemu-guest-agent rsync tar
   systemctl enable --now qemu-guest-agent
   install_docker
   configure_access

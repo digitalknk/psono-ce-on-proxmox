@@ -131,6 +131,8 @@ The installer asks for a Tailscale auth key. You can leave it blank and finish t
 
 In Tailscale mode Psono listens only on `127.0.0.1:10200`.
 
+This installer uses a full VM, not an LXC container. You do not need to enable a Proxmox-side TUN device for the guest. The VM has its own kernel, and the bootstrap checks `/dev/net/tun` inside Debian before starting Tailscale.
+
 To create an auth key:
 
 1. Open the Tailscale admin console.
