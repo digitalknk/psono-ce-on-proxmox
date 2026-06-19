@@ -31,6 +31,7 @@ Common commands:
   create-user                    Create a Psono user
   promote-user                   Promote a Psono user role
   clear-token                    Remove expired Psono tokens
+  fix-email-salt                 Regenerate EMAIL_SECRET_SALT
   backup                         Dump Postgres and save config files
   update                         Update Psono image, migrate DB, restart
 
@@ -44,6 +45,7 @@ Configuration:
   create-user <username> <email> Create a Psono user and prompt for password
   promote-user <username> <role> Promote a user, for example superuser
   clear-token                    Run Psono's cleartoken maintenance command
+  fix-email-salt                 Repair invalid bcrypt email secret salt
   test-email <address>           Send a Psono test email using current SMTP config
 
 Backup and restore:
@@ -247,6 +249,14 @@ Runs Psono's cleartoken maintenance command through Docker Compose.
 The installer also creates a daily systemd timer for this command.
 USAGE
       ;;
+    fix-email-salt)
+      cat <<'USAGE'
+psonoctl fix-email-salt
+
+Regenerates EMAIL_SECRET_SALT as a bcrypt salt, re-renders settings.yaml,
+and restarts Psono. Use this if user creation fails with "Invalid salt".
+USAGE
+      ;;
     ""|-h|--help|help)
       usage
       ;;
@@ -328,6 +338,18 @@ write_secret_env() {
   printf "%s=%q\n" "${key}" "${value}" >> "${SECRETS_ENV}"
 }
 
+set_secret_env() {
+  local key="$1" value="$2" tmp
+  mkdir -p "${STATE_DIR}"
+  tmp="$(mktemp)"
+  if [[ -f "${SECRETS_ENV}" ]]; then
+    awk -v key="${key}" 'index($0, key "=") != 1 { print }' "${SECRETS_ENV}" >"${tmp}"
+  fi
+  printf "%s=%q\n" "${key}" "${value}" >>"${tmp}"
+  install -m 0600 "${tmp}" "${SECRETS_ENV}"
+  rm -f "${tmp}"
+}
+
 generate_psono_keys() {
   local tmp private public
   tmp="$(mktemp)"
@@ -338,6 +360,10 @@ generate_psono_keys() {
   [[ -n "${private}" && -n "${public}" ]] || die "Could not parse Psono server keys from generateserverkeys output"
   write_secret_env "PRIVATE_KEY" "${private}"
   write_secret_env "PUBLIC_KEY" "${public}"
+}
+
+generate_email_secret_salt() {
+  docker run --rm "${PSONO_IMAGE}" python3 -c 'import bcrypt; print(bcrypt.gensalt(rounds=12).decode())'
 }
 
 ensure_secrets() {
@@ -354,7 +380,7 @@ ensure_secrets() {
   write_secret_env "SECRET_KEY" "$(openssl rand -base64 48 | tr -d '\n')"
   write_secret_env "ACTIVATION_LINK_SECRET" "$(openssl rand -base64 48 | tr -d '\n')"
   write_secret_env "DB_SECRET" "$(openssl rand -base64 48 | tr -d '\n')"
-  write_secret_env "EMAIL_SECRET_SALT" "$(openssl rand -base64 48 | tr -d '\n')"
+  write_secret_env "EMAIL_SECRET_SALT" "$(generate_email_secret_salt)"
   generate_psono_keys
 }
 
@@ -852,6 +878,18 @@ clear_token_cmd() {
   manage_py cleartoken
 }
 
+fix_email_salt_cmd() {
+  require_root
+  require_install
+  local salt
+  salt="$(generate_email_secret_salt)"
+  [[ -n "${salt}" ]] || die "Could not generate EMAIL_SECRET_SALT"
+  set_secret_env "EMAIL_SECRET_SALT" "${salt}"
+  render_config
+  compose up -d psono-combo
+  info "EMAIL_SECRET_SALT regenerated and settings.yaml updated"
+}
+
 bootstrap_cmd() {
   require_root
   render_config
@@ -881,6 +919,7 @@ main() {
     create-user) create_user_cmd "$@" ;;
     promote-user) promote_user_cmd "$@" ;;
     clear-token) clear_token_cmd "$@" ;;
+    fix-email-salt) fix_email_salt_cmd "$@" ;;
     test-email) test_email_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;

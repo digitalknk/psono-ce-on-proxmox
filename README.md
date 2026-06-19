@@ -202,6 +202,7 @@ sudo psonoctl create-user username@example.com user@example.com
 sudo psonoctl promote-user username@example.com superuser
 sudo psonoctl test-email user@example.com
 sudo psonoctl clear-token
+sudo psonoctl fix-email-salt
 sudo psonoctl backup
 sudo psonoctl update
 sudo psonoctl update --with-postgres
@@ -268,6 +269,8 @@ s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<bucket>/<prefix>
 The installer runs Psono database migrations during bootstrap and updates.
 
 It also creates a daily `psono-cleartoken.timer`, equivalent to Psono's documented `cleartoken` cron job.
+
+If user creation fails with `Invalid salt`, update `psonoctl` and run `sudo psonoctl fix-email-salt`.
 
 ## Files In The VM
 
