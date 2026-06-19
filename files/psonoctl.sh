@@ -7,12 +7,15 @@ COMPOSE_FILE="${PSONO_DIR}/docker-compose.yml"
 ENV_FILE="${PSONO_DIR}/.env"
 SETTINGS_FILE="${PSONO_DIR}/data/psono/settings.yaml"
 CONFIG_FILE="${PSONO_DIR}/data/psono/config.json"
+FILESERVER_SETTINGS_FILE="${PSONO_DIR}/data/fileserver/settings.yaml"
+FILESERVER_SHARD_DIR_DEFAULT="${PSONO_DIR}/data/fileserver-shards"
 RESTIC_ENV="${STATE_DIR}/restic.env"
 INSTALL_ENV="${STATE_DIR}/psono.env"
 SECRETS_ENV="${STATE_DIR}/secrets.env"
 POSTGRES_MAJOR="${POSTGRES_MAJOR:-18}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:${POSTGRES_MAJOR}-alpine}"
 PSONO_IMAGE="${PSONO_IMAGE:-psono/psono-combo:latest}"
+FILESERVER_IMAGE="${FILESERVER_IMAGE:-psono/psono-fileserver:latest}"
 
 usage() {
   cat <<'USAGE'
@@ -35,6 +38,7 @@ Common commands:
   fingerprint                    Show local server key fingerprints
   harden                         Apply VM hardening
   doctor                         Check VM and Psono health
+  fileserver-test                Run fileserver config check
   backup                         Dump Postgres and save config files
   update                         Update Psono image, migrate DB, restart
 
@@ -52,6 +56,7 @@ Configuration:
   fingerprint                    Show values used to verify first login
   harden                         Apply firewall, SSH, update, and config hardening
   doctor                         Report firewall, access, service, and backup state
+  fileserver-test                Run Psono fileserver testconfig
   test-email <address>           Send a Psono test email using current SMTP config
 
 Backup and restore:
@@ -69,6 +74,7 @@ Paths:
   Compose file:  /opt/psono/docker-compose.yml
   Server config: /opt/psono/data/psono/settings.yaml
   Client config: /opt/psono/data/psono/config.json
+  Fileserver:    /opt/psono/data/fileserver/settings.yaml
   Installer env: /root/.config/psono-installer
 
 Examples:
@@ -81,6 +87,7 @@ Examples:
   psonoctl fingerprint
   psonoctl harden
   psonoctl doctor
+  psonoctl fileserver-test
   psonoctl test-email admin@example.com
   psonoctl backup
   psonoctl update
@@ -306,6 +313,14 @@ Tailscale/Caddy status, disk space, Docker health, backup config,
 registration setting, and local Psono health.
 USAGE
       ;;
+    fileserver-test)
+      cat <<'USAGE'
+psonoctl fileserver-test
+
+Runs Psono fileserver's testconfig command through Docker Compose.
+Use this after enabling file sharing or changing fileserver settings.
+USAGE
+      ;;
     ""|-h|--help|help)
       usage
       ;;
@@ -332,6 +347,7 @@ require_root() {
 require_install() {
   [[ -f "${COMPOSE_FILE}" ]] || die "${COMPOSE_FILE} is missing"
   [[ -f "${ENV_FILE}" ]] || die "${ENV_FILE} is missing"
+  load_env_file "${INSTALL_ENV}"
 }
 
 compose() {
@@ -381,6 +397,25 @@ public_host_from_url() {
   printf '%s\n' "${url%%/*}"
 }
 
+fileserver_enabled() {
+  case "${FILESERVER_ENABLED:-false}" in
+    true|True|TRUE|yes|Yes|YES|1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fileserver_public_url() {
+  local public_url="${PUBLIC_URL:-}"
+  if [[ -z "${public_url}" ]]; then
+    public_url="http://$(primary_ip):10200"
+  fi
+  if [[ "${ACCESS_MODE:-lab-http}" == "lab-http" ]]; then
+    printf 'http://%s:10300\n' "$(primary_ip)"
+  else
+    printf '%s%s\n' "${public_url%/}" "${FILESERVER_PATH:-/fileserver}"
+  fi
+}
+
 write_secret_env() {
   local key="$1"
   local value="$2"
@@ -417,6 +452,9 @@ generate_email_secret_salt() {
 
 ensure_secrets() {
   mkdir -p "${STATE_DIR}" "${PSONO_DIR}/data/psono" "${PSONO_DIR}/data/postgres"
+  if fileserver_enabled; then
+    mkdir -p "${PSONO_DIR}/data/fileserver" "${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}"
+  fi
   chmod 0700 "${STATE_DIR}"
   if [[ -f "${SECRETS_ENV}" ]]; then
     chmod 0600 "${SECRETS_ENV}"
@@ -435,6 +473,9 @@ ensure_secrets() {
 
 render_compose() {
   mkdir -p "${PSONO_DIR}/data/postgres" "${PSONO_DIR}/data/psono"
+  if fileserver_enabled; then
+    mkdir -p "${PSONO_DIR}/data/fileserver" "${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}"
+  fi
   local bind_ip="127.0.0.1"
   if [[ "${ACCESS_MODE:-lab-http}" == "lab-http" ]]; then
     bind_ip="0.0.0.0"
@@ -472,6 +513,24 @@ services:
       - ./data/psono/config.json:/usr/share/nginx/html/config.json:ro
       - ./data/psono/config.json:/usr/share/nginx/html/portal/config.json:ro
 EOF_COMPOSE
+
+  if fileserver_enabled; then
+    cat >>"${COMPOSE_FILE}" <<EOF_FILESERVER
+
+  psono-fileserver:
+    image: ${FILESERVER_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      - psono-combo
+    sysctls:
+      net.core.somaxconn: "65535"
+    ports:
+      - "${bind_ip}:10300:80"
+    volumes:
+      - ./data/fileserver/settings.yaml:/root/.psono_fileserver/settings.yaml:ro
+      - \${FILESERVER_SHARD_DIR}:/opt/psono-shard
+EOF_FILESERVER
+  fi
 }
 
 render_settings() {
@@ -495,6 +554,7 @@ render_settings() {
 
   cat >"${ENV_FILE}" <<EOF_ENV
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+FILESERVER_SHARD_DIR=${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}
 EOF_ENV
   chmod 0600 "${ENV_FILE}"
 
@@ -525,6 +585,20 @@ ALLOW_REGISTRATION: $(bool_yaml "${allow_registration}")
 ALLOW_LOST_PASSWORD: $(bool_yaml "${allow_lost_password}")
 ALLOWED_SECOND_FACTORS: [${second_factors}]
 EOF_SETTINGS
+
+  if fileserver_enabled; then
+    cat >>"${SETTINGS_FILE}" <<'EOF_FILESERVER_SERVER'
+
+FILESERVER_HANDLER_ENABLED: True
+FILES_ENABLED: True
+EOF_FILESERVER_SERVER
+  else
+    cat >>"${SETTINGS_FILE}" <<'EOF_FILESERVER_SERVER'
+
+FILESERVER_HANDLER_ENABLED: False
+FILES_ENABLED: False
+EOF_FILESERVER_SERVER
+  fi
 
   if [[ "${smtp_enabled}" == "true" ]]; then
     cat >>"${SETTINGS_FILE}" <<EOF_SMTP
@@ -579,6 +653,7 @@ Psono is installed in ${PSONO_DIR} and managed with:
   sudo psonoctl logs -f
   sudo psonoctl doctor
   sudo psonoctl harden
+  sudo psonoctl fileserver-test
   sudo psonoctl update
   sudo psonoctl backup
 
@@ -591,6 +666,13 @@ Configuration:
   ${SETTINGS_FILE}
   ${CONFIG_FILE}
   ${ENV_FILE}
+
+Fileserver:
+
+  Enabled: ${FILESERVER_ENABLED:-false}
+  URL: $(fileserver_public_url)
+  Settings: ${FILESERVER_SETTINGS_FILE}
+  Shards: ${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}
 
 Backups:
 
@@ -611,8 +693,8 @@ EOF_README
 
 render_config() {
   require_root
-  ensure_secrets
   load_env_file "${INSTALL_ENV}"
+  ensure_secrets
   load_env_file "${SECRETS_ENV}"
   render_compose
   render_settings
@@ -636,6 +718,14 @@ migrate() {
 
 manage_py() {
   compose run --rm psono-combo python3 ./psono/manage.py "$@"
+}
+
+fileserver_manage_py() {
+  compose run --rm psono-fileserver python3 ./psono/manage.py "$@"
+}
+
+extract_uuid() {
+  grep -Eo '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n 1
 }
 
 status_cmd() {
@@ -681,7 +771,17 @@ backup_cmd() {
 
   info "Dumping PostgreSQL"
   compose exec -T psono-database pg_dump -U psono -d psono >"${backup_dir}/psono.sql"
-  tar -C "${PSONO_DIR}" -czf "${backup_dir}/psono-config.tar.gz" data/psono docker-compose.yml .env README.md
+  local tar_items shard_dir
+  shard_dir="${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}"
+  tar_items=(data/psono docker-compose.yml .env README.md)
+  [[ -d "${PSONO_DIR}/data/fileserver" ]] && tar_items+=(data/fileserver)
+  if [[ -d "${shard_dir}" && "${shard_dir}" == "${PSONO_DIR}/"* ]]; then
+    tar_items+=("${shard_dir#${PSONO_DIR}/}")
+  fi
+  tar -C "${PSONO_DIR}" -czf "${backup_dir}/psono-config.tar.gz" "${tar_items[@]}"
+  if [[ -d "${shard_dir}" && "${shard_dir}" != "${PSONO_DIR}/"* ]]; then
+    tar -C "$(dirname "${shard_dir}")" -czf "${backup_dir}/psono-fileserver-shards.tar.gz" "$(basename "${shard_dir}")"
+  fi
 
   if [[ -f "${RESTIC_ENV}" ]]; then
     info "Sending backup to restic repository"
@@ -689,7 +789,11 @@ backup_cmd() {
     # shellcheck disable=SC1090
     source "${RESTIC_ENV}"
     set +a
-    restic backup "${backup_dir}/psono.sql" "${backup_dir}/psono-config.tar.gz" "${PSONO_DIR}/data/psono" "${PSONO_DIR}/docker-compose.yml" "${PSONO_DIR}/.env"
+    local restic_items
+    restic_items=("${backup_dir}/psono.sql" "${backup_dir}/psono-config.tar.gz" "${PSONO_DIR}/data/psono" "${PSONO_DIR}/docker-compose.yml" "${PSONO_DIR}/.env")
+    [[ -d "${PSONO_DIR}/data/fileserver" ]] && restic_items+=("${PSONO_DIR}/data/fileserver")
+    [[ -d "${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}" ]] && restic_items+=("${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}")
+    restic backup "${restic_items[@]}"
     restic forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 6
   fi
 
@@ -721,9 +825,21 @@ restore_cmd() {
   set +a
   restic restore "${snapshot}" --target "${tmp}"
 
+  if fileserver_enabled; then
+    compose stop psono-fileserver || true
+  fi
   compose stop psono-combo
   if [[ -d "${tmp}${PSONO_DIR}/data/psono" ]]; then
     rsync -a --delete "${tmp}${PSONO_DIR}/data/psono/" "${PSONO_DIR}/data/psono/"
+  fi
+  if [[ -d "${tmp}${PSONO_DIR}/data/fileserver" ]]; then
+    mkdir -p "${PSONO_DIR}/data/fileserver"
+    rsync -a --delete "${tmp}${PSONO_DIR}/data/fileserver/" "${PSONO_DIR}/data/fileserver/"
+  fi
+  local shard_dir="${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}"
+  if [[ -d "${tmp}${shard_dir}" ]]; then
+    mkdir -p "${shard_dir}"
+    rsync -a --delete "${tmp}${shard_dir}/" "${shard_dir}/"
   fi
   local sql
   sql="$(find "${tmp}" -name psono.sql -type f | sort | tail -n 1)"
@@ -731,6 +847,9 @@ restore_cmd() {
   compose exec -T psono-database psql -U psono -d psono -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
   cat "${sql}" | compose exec -T psono-database psql -U psono -d psono
   compose up -d
+  if fileserver_enabled; then
+    fileserver_test_cmd
+  fi
   health_cmd
 }
 
@@ -763,12 +882,23 @@ update_cmd() {
 
   info "Pulling latest Psono image"
   compose pull psono-combo
+  if fileserver_enabled; then
+    info "Pulling latest Psono fileserver image"
+    compose pull psono-fileserver
+  fi
   info "Stopping Psono before migration"
   compose stop psono-combo || true
+  if fileserver_enabled; then
+    compose stop psono-fileserver || true
+  fi
   info "Running migrations"
   migrate
   info "Starting Psono"
   compose up -d psono-combo
+  if fileserver_enabled; then
+    fileserver_test_cmd
+    compose up -d psono-fileserver
+  fi
   info "Checking health"
   health_cmd
   docker image prune -f
@@ -812,6 +942,9 @@ postgres_upgrade_cmd() {
   mkdir -p "$(dirname "${dump}")"
   compose exec -T psono-database pg_dump -U psono -d psono -Fc >"${dump}"
 
+  if fileserver_enabled; then
+    compose stop psono-fileserver || true
+  fi
   compose stop psono-combo
   compose stop psono-database
   old_dir="${PSONO_DIR}/data/postgres-pre-${current}-${ts}"
@@ -825,6 +958,10 @@ postgres_upgrade_cmd() {
   cat "${dump}" | compose exec -T psono-database pg_restore --clean --if-exists -U psono -d psono
   migrate
   compose up -d psono-combo
+  if fileserver_enabled; then
+    fileserver_test_cmd
+    compose up -d psono-fileserver
+  fi
   health_cmd
   info "Old PostgreSQL data directory preserved at ${old_dir}"
 }
@@ -861,7 +998,7 @@ prompt_bool() {
 write_install_env() {
   : >"${INSTALL_ENV}"
   chmod 0600 "${INSTALL_ENV}"
-  for key in ACCESS_MODE PUBLIC_URL ALLOWED_DOMAIN VM_AUTH_METHOD HARDENING_PROFILE SSH_EXPOSURE TAILSCALE_SSH ALLOW_REGISTRATION SMTP_ENABLED SMTP_EMAIL_FROM SMTP_HOST SMTP_HOST_USER SMTP_HOST_PASSWORD SMTP_PORT SMTP_USE_TLS SMTP_USE_SSL SMTP_TIMEOUT YUBIKEY_ENABLED YUBIKEY_CLIENT_ID YUBIKEY_SECRET_KEY; do
+  for key in ACCESS_MODE PUBLIC_URL ALLOWED_DOMAIN VM_AUTH_METHOD HARDENING_PROFILE SSH_EXPOSURE TAILSCALE_SSH FILESERVER_ENABLED FILESERVER_STORAGE FILESERVER_PATH FILESERVER_SHARD_DIR FILESERVER_CLUSTER_ID FILESERVER_SHARD_ID ALLOW_REGISTRATION SMTP_ENABLED SMTP_EMAIL_FROM SMTP_HOST SMTP_HOST_USER SMTP_HOST_PASSWORD SMTP_PORT SMTP_USE_TLS SMTP_USE_SSL SMTP_TIMEOUT YUBIKEY_ENABLED YUBIKEY_CLIENT_ID YUBIKEY_SECRET_KEY; do
     printf "%s=%q\n" "${key}" "${!key:-}" >>"${INSTALL_ENV}"
   done
 }
@@ -885,6 +1022,13 @@ config_cmd() {
 
   PUBLIC_URL="$(prompt "Public Psono URL" "${PUBLIC_URL:-http://$(primary_ip):10200}")"
   ALLOWED_DOMAIN="$(prompt "Allowed account domain" "${ALLOWED_DOMAIN:-$(public_host_from_url "${PUBLIC_URL}")}")"
+  FILESERVER_ENABLED="$(prompt_bool "Enable Psono fileserver? true/false" "${FILESERVER_ENABLED:-true}")"
+  if [[ "${FILESERVER_ENABLED}" == "true" ]]; then
+    FILESERVER_STORAGE="local"
+    FILESERVER_PATH="$(prompt "Fileserver path" "${FILESERVER_PATH:-/fileserver}")"
+    [[ "${FILESERVER_PATH}" == /* ]] || die "Fileserver path must start with /"
+    FILESERVER_SHARD_DIR="$(prompt "Fileserver shard directory" "${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}")"
+  fi
   ALLOW_REGISTRATION="$(prompt_bool "Allow registration? true/false" "${ALLOW_REGISTRATION:-false}")"
 
   SMTP_ENABLED="$(prompt_bool "Configure SMTP email? true/false" "${SMTP_ENABLED:-false}")"
@@ -907,6 +1051,13 @@ config_cmd() {
 
   write_install_env
   render_config
+  if fileserver_enabled; then
+    compose up -d psono-database
+    wait_db
+    migrate
+    compose up -d psono-combo
+    bootstrap_fileserver
+  fi
   compose up -d
   health_cmd
 }
@@ -994,6 +1145,70 @@ fix_email_salt_cmd() {
   info "EMAIL_SECRET_SALT regenerated and settings.yaml updated"
 }
 
+render_fileserver_settings() {
+  fileserver_enabled || return 0
+  [[ "${FILESERVER_STORAGE:-local}" == "local" ]] || die "Only local fileserver storage is supported"
+  [[ -n "${FILESERVER_CLUSTER_ID:-}" ]] || die "FILESERVER_CLUSTER_ID is missing"
+  [[ -n "${FILESERVER_SHARD_ID:-}" ]] || die "FILESERVER_SHARD_ID is missing"
+
+  local raw filtered shard_host_dir shard_container_dir
+  raw="$(mktemp)"
+  filtered="$(mktemp)"
+  manage_py fsclustershowconfig "${FILESERVER_CLUSTER_ID}" >"${raw}"
+  awk '
+    /^[A-Z_]+:/ && $0 !~ /^(SERVER_URL|SHARDS|DEBUG|ALLOWED_HOSTS|HOST_URL):/ { print }
+  ' "${raw}" >"${filtered}"
+  grep -q '^CLUSTER_PRIVATE_KEY:' "${filtered}" || die "Could not generate fileserver cluster config"
+
+  shard_host_dir="${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}/${FILESERVER_SHARD_ID}"
+  shard_container_dir="/opt/psono-shard/${FILESERVER_SHARD_ID}"
+  mkdir -p "$(dirname "${FILESERVER_SETTINGS_FILE}")" "${shard_host_dir}"
+
+  {
+    cat "${filtered}"
+    printf 'SERVER_URL: %s\n' "$(quote_yaml "${PUBLIC_URL%/}/server")"
+    printf 'HOST_URL: %s\n' "$(quote_yaml "$(fileserver_public_url)")"
+    printf "SHARDS: [{shard_id: %s, read: True, write: True, delete: True, engine: {class: 'local', kwargs: {location: %s}}}]\n" "${FILESERVER_SHARD_ID}" "$(quote_yaml "${shard_container_dir}")"
+    printf 'DEBUG: False\n'
+    printf "ALLOWED_HOSTS: ['*']\n"
+  } >"${FILESERVER_SETTINGS_FILE}"
+  chmod 0600 "${FILESERVER_SETTINGS_FILE}"
+  rm -f "${raw}" "${filtered}"
+}
+
+bootstrap_fileserver() {
+  fileserver_enabled || return 0
+  [[ "${FILESERVER_STORAGE:-local}" == "local" ]] || die "Only local fileserver storage is supported"
+
+  local output cluster_id shard_id
+  if [[ -z "${FILESERVER_CLUSTER_ID:-}" ]]; then
+    output="$(manage_py fsclustercreate "Default Cluster")"
+    cluster_id="$(printf '%s\n' "${output}" | extract_uuid)"
+    [[ -n "${cluster_id}" ]] || die "Could not parse fileserver cluster id from: ${output}"
+    FILESERVER_CLUSTER_ID="${cluster_id}"
+    set_install_env_value "FILESERVER_CLUSTER_ID" "${FILESERVER_CLUSTER_ID}"
+  fi
+
+  if [[ -z "${FILESERVER_SHARD_ID:-}" ]]; then
+    output="$(manage_py fsshardcreate "Default Local Shard" "Local fileserver shard")"
+    shard_id="$(printf '%s\n' "${output}" | extract_uuid)"
+    [[ -n "${shard_id}" ]] || die "Could not parse fileserver shard id from: ${output}"
+    FILESERVER_SHARD_ID="${shard_id}"
+    set_install_env_value "FILESERVER_SHARD_ID" "${FILESERVER_SHARD_ID}"
+  fi
+
+  manage_py fsshardlink "${FILESERVER_CLUSTER_ID}" "${FILESERVER_SHARD_ID}" rw >/dev/null 2>&1 || true
+  render_fileserver_settings
+  fileserver_test_cmd
+}
+
+fileserver_test_cmd() {
+  require_install
+  fileserver_enabled || die "Fileserver is not enabled"
+  [[ -f "${FILESERVER_SETTINGS_FILE}" ]] || die "${FILESERVER_SETTINGS_FILE} is missing"
+  fileserver_manage_py testconfig
+}
+
 validate_hardening_profile() {
   case "${1:-}" in
     none|minimal|balanced|strict) ;;
@@ -1053,7 +1268,13 @@ write_nftables_rules() {
   esac
 
   case "${ACCESS_MODE:-lab-http}" in
-    lab-http) access_rule="    tcp dport 10200 accept" ;;
+    lab-http)
+      if fileserver_enabled; then
+        access_rule="    tcp dport { 10200, 10300 } accept"
+      else
+        access_rule="    tcp dport 10200 accept"
+      fi
+      ;;
     caddy-https) access_rule="    tcp dport { 80, 443 } accept" ;;
     tailscale-https) tailscale_rule="    iifname \"tailscale0\" tcp dport 443 accept" ;;
   esac
@@ -1151,6 +1372,11 @@ doctor_cmd() {
   echo
   printf '%-28s%s\n' "Access mode:" "${ACCESS_MODE:-unknown}"
   printf '%-28s%s\n' "Public URL:" "${PUBLIC_URL:-unknown}"
+  printf '%-28s%s\n' "Fileserver enabled:" "${FILESERVER_ENABLED:-false}"
+  if fileserver_enabled; then
+    printf '%-28s%s\n' "Fileserver URL:" "$(fileserver_public_url)"
+    printf '%-28s%s\n' "Fileserver shard dir:" "${FILESERVER_SHARD_DIR:-${FILESERVER_SHARD_DIR_DEFAULT}}"
+  fi
   printf '%-28s%s\n' "Hardening profile:" "${HARDENING_PROFILE:-unknown}"
   printf '%-28s%s\n' "SSH exposure:" "${SSH_EXPOSURE:-unknown}"
   if [[ -f "${CONFIG_FILE}" ]]; then
@@ -1182,6 +1408,12 @@ doctor_cmd() {
   else
     echo "Psono Compose files are missing."
   fi
+  if fileserver_enabled; then
+    echo
+    echo "Fileserver health:"
+    curl -fsS "http://127.0.0.1:10300/info/" || true
+    echo
+  fi
 }
 
 bootstrap_cmd() {
@@ -1191,6 +1423,10 @@ bootstrap_cmd() {
   compose up -d psono-database
   wait_db
   migrate
+  if fileserver_enabled; then
+    compose up -d psono-combo
+    bootstrap_fileserver
+  fi
   compose up -d
 }
 
@@ -1217,6 +1453,7 @@ main() {
     fingerprint) fingerprint_cmd "$@" ;;
     harden) harden_cmd "$@" ;;
     doctor) doctor_cmd "$@" ;;
+    fileserver-test) fileserver_test_cmd "$@" ;;
     test-email) test_email_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;

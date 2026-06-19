@@ -13,6 +13,7 @@ Status: early homelab installer. Read the script before running it on a Proxmox 
 - VM name `psono-<VMID>` by default
 - Docker and Docker Compose inside the VM
 - `psono/psono-combo:latest`
+- `psono/psono-fileserver:latest` when file sharing is enabled
 - `postgres:18-alpine`
 - Psono files under `/opt/psono`
 - `/usr/local/sbin/psonoctl` for day-to-day management
@@ -60,6 +61,8 @@ By default it asks for a password for the `psono` user and enables password SSH 
 
 The installer also asks for a hardening profile. The recommended profile is `balanced`; it enables an inbound firewall, Debian security updates, SSH hardening, and disables open Psono registration.
 
+The installer asks whether to enable the Psono fileserver and defaults to yes. Fileserver support uses local VM storage in this first version.
+
 The login is rendered into the custom cloud-init user-data used by this installer.
 
 Multiple installs on the same Proxmox host are supported. Each install needs its own VMID and VM name. By default the script asks Proxmox for the next VMID and names the VM `psono-<VMID>`.
@@ -87,6 +90,7 @@ bash setup-psono-vm.sh \
   --password 'change-this-password' \
   --access-mode lab-http \
   --hardening-profile balanced \
+  --fileserver true \
   --backup-mode none
 ```
 
@@ -106,6 +110,7 @@ bash setup-psono-vm.sh \
   --tailscale-exposure serve \
   --tailscale-ssh false \
   --ssh-exposure lan \
+  --fileserver true \
   --tailscale-auth-key tskey-auth-...
 ```
 
@@ -116,6 +121,7 @@ bash setup-psono-vm.sh \
   --access-mode tailscale-https \
   --tailscale-exposure funnel \
   --hardening-profile balanced \
+  --fileserver true \
   --tailscale-auth-key tskey-auth-...
 ```
 
@@ -127,6 +133,7 @@ bash setup-psono-vm.sh \
   --tailscale-exposure serve \
   --tailscale-ssh true \
   --ssh-exposure tailscale \
+  --fileserver true \
   --tailscale-auth-key tskey-auth-...
 ```
 
@@ -161,6 +168,8 @@ tailscale funnel --bg --https=443 http://127.0.0.1:10200
 The installer asks for a Tailscale auth key. You can leave it blank and finish the normal Tailscale login from the URL printed in the VM bootstrap log. Funnel requires the tailnet-side Funnel settings that Tailscale documents, including MagicDNS, HTTPS certificates, and Funnel permission in the tailnet policy.
 
 In Tailscale mode Psono listens only on `127.0.0.1:10200`.
+
+When fileserver is enabled, it listens on `127.0.0.1:10300` and is exposed through the same MagicDNS name at `/fileserver`.
 
 This installer uses a full VM, not an LXC container. You do not need to enable a Proxmox-side TUN device for the guest. The VM has its own kernel, and the bootstrap checks `/dev/net/tun` inside Debian before starting Tailscale.
 
@@ -200,6 +209,8 @@ Use this when the VM can receive traffic for the domain and Caddy can complete A
 
 Caddy mode includes basic security headers and keeps Psono bound to `127.0.0.1:10200` behind the reverse proxy.
 
+When fileserver is enabled, Caddy routes `/fileserver` to `127.0.0.1:10300`.
+
 ## Hardening
 
 Hardening profiles:
@@ -217,6 +228,7 @@ The firewall uses `nftables`:
 - `lab-http`: opens `10200/tcp`
 - `caddy-https`: opens `80/tcp` and `443/tcp`
 - `tailscale-https`: opens no LAN Psono port
+- fileserver port `10300/tcp` is opened only in `lab-http`
 
 For an existing VM:
 
@@ -231,6 +243,7 @@ This installer does not add Watchtower. Use `sudo psonoctl update` so backups, m
 
 The installer can also configure:
 
+- Psono fileserver with local VM shard storage
 - SMTP email
 - YubiKey OTP
 - restic backups to S3-compatible service (AWS, Cloudflare R2, Backblaze B2, Minio, etc.)
@@ -259,6 +272,7 @@ sudo psonoctl fix-email-salt
 sudo psonoctl fingerprint
 sudo psonoctl harden
 sudo psonoctl doctor
+sudo psonoctl fileserver-test
 sudo psonoctl backup
 sudo psonoctl update
 sudo psonoctl update --with-postgres
@@ -284,6 +298,8 @@ That command:
 7. Prunes old images after the health check passes.
 
 This installer intentionally does not use Watchtower or automatic container updates. Psono updates are not just image pulls: the app container should be stopped at the right point, database migrations need to run, the service needs a health check before cleanup, and PostgreSQL updates must stay within the pinned major version unless you explicitly run a major upgrade. `psonoctl update` keeps that order visible and recoverable.
+
+When fileserver is enabled, `psonoctl update` also pulls and restarts `psono-fileserver` after the server migration flow.
 
 Update the PostgreSQL patch image within the same major version:
 
@@ -313,6 +329,8 @@ Each backup includes:
 
 - PostgreSQL dump
 - `/opt/psono/data/psono`
+- `/opt/psono/data/fileserver`
+- `/opt/psono/data/fileserver-shards`
 - `/opt/psono/docker-compose.yml`
 - `/opt/psono/.env`
 
@@ -340,6 +358,8 @@ On first login, Psono may ask you to approve a server fingerprint. Verify it fro
 /opt/psono/data/postgres
 /opt/psono/data/psono/settings.yaml
 /opt/psono/data/psono/config.json
+/opt/psono/data/fileserver/settings.yaml
+/opt/psono/data/fileserver-shards
 /opt/psono/README.md
 /usr/local/sbin/psonoctl
 /root/.config/psono-installer/

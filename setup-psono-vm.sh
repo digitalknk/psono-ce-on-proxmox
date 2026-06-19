@@ -40,6 +40,10 @@ CADDY_DOMAIN_ARG=""
 CADDY_EMAIL_ARG=""
 HARDENING_PROFILE_ARG=""
 SSH_EXPOSURE_ARG=""
+FILESERVER_ENABLED_ARG=""
+FILESERVER_STORAGE_ARG=""
+FILESERVER_PATH_ARG=""
+FILESERVER_SHARD_DIR_ARG=""
 ALLOW_REGISTRATION_ARG=""
 SMTP_ENABLED_ARG=""
 SMTP_EMAIL_FROM_ARG=""
@@ -99,6 +103,10 @@ Access options:
   --caddy-email EMAIL          Optional ACME email for Caddy
   --hardening-profile PROFILE  none, minimal, balanced, or strict
   --ssh-exposure MODE          lan, tailscale, or disabled
+  --fileserver true|false      Enable Psono fileserver (default: true)
+  --fileserver-storage MODE    local (default: local)
+  --fileserver-path PATH       Public path for fileserver (default: /fileserver)
+  --fileserver-shard-dir PATH  Local shard storage path
 
 Psono config options:
   --allow-registration true|false
@@ -312,6 +320,10 @@ parse_args() {
       --caddy-email|--caddy-email=*) CADDY_EMAIL_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --hardening-profile|--hardening-profile=*) HARDENING_PROFILE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --ssh-exposure|--ssh-exposure=*) SSH_EXPOSURE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --fileserver|--fileserver=*) FILESERVER_ENABLED_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --fileserver-storage|--fileserver-storage=*) FILESERVER_STORAGE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --fileserver-path|--fileserver-path=*) FILESERVER_PATH_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --fileserver-shard-dir|--fileserver-shard-dir=*) FILESERVER_SHARD_DIR_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --allow-registration|--allow-registration=*) ALLOW_REGISTRATION_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --smtp|--smtp=*) SMTP_ENABLED_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --smtp-from|--smtp-from=*) SMTP_EMAIL_FROM_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
@@ -346,6 +358,7 @@ parse_args() {
   validate_bool "--smtp-use-ssl" "${SMTP_USE_SSL_ARG}"
   validate_bool "--yubikey" "${YUBIKEY_ENABLED_ARG}"
   validate_bool "--tailscale-ssh" "${TAILSCALE_SSH_ARG}"
+  validate_bool "--fileserver" "${FILESERVER_ENABLED_ARG}"
   case "${AUTH_METHOD_ARG}" in
     ""|password|ssh-key) ;;
     *) die "--auth-method must be password or ssh-key" ;;
@@ -366,6 +379,13 @@ parse_args() {
     ""|lan|tailscale|disabled) ;;
     *) die "--ssh-exposure must be lan, tailscale, or disabled" ;;
   esac
+  case "${FILESERVER_STORAGE_ARG}" in
+    ""|local) ;;
+    *) die "--fileserver-storage must be local" ;;
+  esac
+  if [[ -n "${FILESERVER_PATH_ARG}" && "${FILESERVER_PATH_ARG}" != /* ]]; then
+    die "--fileserver-path must start with /"
+  fi
   case "${BACKUP_MODE_ARG}" in
     ""|none|r2|s3) ;;
     *) die "--backup-mode must be none, r2, or s3" ;;
@@ -525,6 +545,10 @@ VM_AUTH_METHOD=${VM_AUTH_METHOD@Q}
 HARDENING_PROFILE=${HARDENING_PROFILE@Q}
 SSH_EXPOSURE=${SSH_EXPOSURE@Q}
 TAILSCALE_SSH=${TAILSCALE_SSH@Q}
+FILESERVER_ENABLED=${FILESERVER_ENABLED@Q}
+FILESERVER_STORAGE=${FILESERVER_STORAGE@Q}
+FILESERVER_PATH=${FILESERVER_PATH@Q}
+FILESERVER_SHARD_DIR=${FILESERVER_SHARD_DIR@Q}
 ALLOW_REGISTRATION=${ALLOW_REGISTRATION@Q}
 SMTP_ENABLED=${SMTP_ENABLED@Q}
 SMTP_EMAIL_FROM=${SMTP_EMAIL_FROM@Q}
@@ -702,6 +726,12 @@ configure_access() {
       check_port_free 80
       check_port_free 443
       install_caddy
+      local fileserver_caddy_route=""
+      if [[ "${FILESERVER_ENABLED}" == "true" ]]; then
+        fileserver_caddy_route="  handle_path ${FILESERVER_PATH:-/fileserver}* {
+    reverse_proxy 127.0.0.1:10300
+  }"
+      fi
       if [[ -n "${CADDY_EMAIL}" ]]; then
         cat >/etc/caddy/Caddyfile <<EOF_CADDY
 {
@@ -719,7 +749,10 @@ ${CADDY_DOMAIN} {
   request_body {
     max_size 200MB
   }
-  reverse_proxy 127.0.0.1:10200
+${fileserver_caddy_route}
+  handle {
+    reverse_proxy 127.0.0.1:10200
+  }
 }
 EOF_CADDY
       else
@@ -735,7 +768,10 @@ ${CADDY_DOMAIN} {
   request_body {
     max_size 200MB
   }
-  reverse_proxy 127.0.0.1:10200
+${fileserver_caddy_route}
+  handle {
+    reverse_proxy 127.0.0.1:10200
+  }
 }
 EOF_CADDY
       fi
@@ -756,11 +792,17 @@ configure_tailscale_exposure_service() {
     return
   fi
 
-  local exposure_cmd
+  local exposure_cmd fileserver_exposure_cmd=""
   if [[ "${TAILSCALE_EXPOSURE}" == "funnel" ]]; then
     exposure_cmd="/usr/bin/tailscale funnel --bg --https=443 http://127.0.0.1:10200"
+    if [[ "${FILESERVER_ENABLED}" == "true" ]]; then
+      fileserver_exposure_cmd="ExecStart=/usr/bin/tailscale funnel --bg --https=443 --set-path=${FILESERVER_PATH:-/fileserver} http://127.0.0.1:10300"
+    fi
   else
     exposure_cmd="/usr/bin/tailscale serve --bg --https=443 http://127.0.0.1:10200"
+    if [[ "${FILESERVER_ENABLED}" == "true" ]]; then
+      fileserver_exposure_cmd="ExecStart=/usr/bin/tailscale serve --bg --https=443 --set-path=${FILESERVER_PATH:-/fileserver} http://127.0.0.1:10300"
+    fi
   fi
 
   cat >/etc/systemd/system/psono-tailscale-exposure.service <<EOF_TAILSCALE_SERVICE
@@ -772,6 +814,7 @@ Wants=tailscaled.service docker.service
 [Service]
 Type=oneshot
 ExecStart=${exposure_cmd}
+${fileserver_exposure_cmd}
 RemainAfterExit=yes
 
 [Install]
@@ -965,6 +1008,18 @@ main() {
   fi
 
   local allow_registration smtp_enabled smtp_email_from smtp_host smtp_host_user smtp_host_password smtp_port smtp_use_tls smtp_use_ssl smtp_timeout
+  local fileserver_enabled fileserver_storage fileserver_path fileserver_shard_dir
+  if [[ -n "${FILESERVER_ENABLED_ARG}" ]]; then
+    fileserver_enabled="${FILESERVER_ENABLED_ARG}"
+  elif [[ -t 0 ]]; then
+    fileserver_enabled="$(prompt_bool "Enable Psono fileserver" "true")"
+  else
+    fileserver_enabled="true"
+  fi
+  fileserver_storage="${FILESERVER_STORAGE_ARG:-local}"
+  fileserver_path="${FILESERVER_PATH_ARG:-/fileserver}"
+  fileserver_shard_dir="${FILESERVER_SHARD_DIR_ARG:-/opt/psono/data/fileserver-shards}"
+
   allow_registration="${ALLOW_REGISTRATION_ARG:-$(prompt_bool "Allow initial registration" "false")}"
   smtp_enabled="${SMTP_ENABLED_ARG:-$(prompt_bool "Configure SMTP email" "false")}"
   smtp_email_from="${SMTP_EMAIL_FROM_ARG}"
@@ -1047,6 +1102,10 @@ main() {
     "$(shell_quote_line VM_AUTH_METHOD "${auth_method}")" \
     "$(shell_quote_line HARDENING_PROFILE "${hardening_profile}")" \
     "$(shell_quote_line SSH_EXPOSURE "${ssh_exposure}")" \
+    "$(shell_quote_line FILESERVER_ENABLED "${fileserver_enabled}")" \
+    "$(shell_quote_line FILESERVER_STORAGE "${fileserver_storage}")" \
+    "$(shell_quote_line FILESERVER_PATH "${fileserver_path}")" \
+    "$(shell_quote_line FILESERVER_SHARD_DIR "${fileserver_shard_dir}")" \
     "$(shell_quote_line TAILSCALE_AUTH_KEY "${tailscale_auth_key}")" \
     "$(shell_quote_line TAILSCALE_HOSTNAME "${tailscale_hostname}")" \
     "$(shell_quote_line TAILSCALE_EXPOSURE "${tailscale_exposure}")" \
