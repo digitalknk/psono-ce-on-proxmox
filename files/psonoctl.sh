@@ -42,7 +42,7 @@ Lifecycle:
 
 Configuration:
   config                         Edit public URL, SMTP, YubiKey, registration
-  create-user <username> <email> Create a Psono user and prompt for password
+  create-user <email>            Create a Psono user and prompt for password
   promote-user <username> <role> Promote a user, for example superuser
   clear-token                    Run Psono's cleartoken maintenance command
   fix-email-salt                 Repair invalid bcrypt email secret salt
@@ -69,7 +69,7 @@ Examples:
   psonoctl status
   psonoctl logs -f
   psonoctl config
-  psonoctl create-user username@example.com user@example.com
+  psonoctl create-user user@example.com
   psonoctl promote-user username@example.com superuser
   psonoctl clear-token
   psonoctl test-email admin@example.com
@@ -221,12 +221,18 @@ USAGE
       ;;
     create-user)
       cat <<'USAGE'
+psonoctl create-user <email>
 psonoctl create-user <username> <email>
 
 Creates a Psono user through Docker Compose and prompts for the password
 without putting it in shell history.
 
+With one argument, the same email-style value is used for both Psono's
+username and email fields. Use two arguments only if you intentionally want
+the login username and email address to differ.
+
 Example:
+  psonoctl create-user user@example.com
   psonoctl create-user username@example.com user@example.com
 USAGE
       ;;
@@ -858,8 +864,10 @@ test_email_cmd() {
 create_user_cmd() {
   require_install
   local username="${1:-}" email="${2:-}" password
-  [[ -n "${username}" ]] || die "create-user requires a username"
-  [[ -n "${email}" ]] || die "create-user requires an email address"
+  [[ -n "${username}" ]] || die "create-user requires an email address"
+  if [[ -z "${email}" ]]; then
+    email="${username}"
+  fi
   password="$(prompt_secret "Password for ${username}")"
   [[ -n "${password}" ]] || die "Password is required"
   manage_py createuser "${username}" "${password}" "${email}"

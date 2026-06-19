@@ -198,7 +198,7 @@ sudo psonoctl stop
 sudo psonoctl restart
 sudo psonoctl logs -f
 sudo psonoctl config
-sudo psonoctl create-user username@example.com user@example.com
+sudo psonoctl create-user user@example.com
 sudo psonoctl promote-user username@example.com superuser
 sudo psonoctl test-email user@example.com
 sudo psonoctl clear-token
