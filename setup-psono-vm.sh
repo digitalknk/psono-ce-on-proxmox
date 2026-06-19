@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
+if [[ -n "${SCRIPT_SOURCE}" && -f "${SCRIPT_SOURCE}" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${SCRIPT_SOURCE}")" && pwd)"
+else
+  SCRIPT_DIR="$(pwd)"
+fi
 TEMPLATE_FILE="${SCRIPT_DIR}/files/cloud-init-user-data.yml.tmpl"
 PSONOCTL_FILE="${SCRIPT_DIR}/files/psonoctl.sh"
 PSONO_INSTALLER_BASE_URL="${PSONO_INSTALLER_BASE_URL:-}"
