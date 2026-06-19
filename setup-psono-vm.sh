@@ -26,6 +26,9 @@ BRIDGE_ARG=""
 STORAGE_ARG=""
 SNIPPET_STORAGE_ARG=""
 SSH_KEY_FILE_ARG=""
+SSH_PUBLIC_KEY_ARG=""
+AUTH_METHOD_ARG=""
+VM_PASSWORD_ARG=""
 IMAGE_URL_ARG=""
 REFRESH_IMAGE_ARG="false"
 ACCESS_MODE_ARG=""
@@ -76,7 +79,10 @@ VM options:
   --bridge NAME                Proxmox bridge (default: vmbr0)
   --storage NAME               VM disk storage (default prompt: local-lvm)
   --snippet-storage NAME       Cloud-init snippet storage (default: local)
-  --ssh-key PATH               SSH public key file
+  --auth-method METHOD         password or ssh-key (default: password)
+  --ssh-key PATH               SSH public key file for auth-method ssh-key
+  --ssh-public-key KEY         Pasted SSH public key for auth-method ssh-key
+  --password PASSWORD          Password for the psono VM user
   --image-url URL              Debian cloud image URL
   --refresh-image              Download image again even if cached locally
 
@@ -189,6 +195,24 @@ prompt_secret() {
   printf '%s\n' "${value}"
 }
 
+prompt_secret_required() {
+  local label="$1" value
+  value="$(prompt_secret "${label}")"
+  [[ -n "${value}" ]] || die "${label} is required"
+  printf '%s\n' "${value}"
+}
+
+prompt_choice() {
+  local label="$1" default="$2" value
+  while true; do
+    value="$(prompt "${label}" "${default}")"
+    case "${value}" in
+      password|ssh-key) printf '%s\n' "${value}"; return ;;
+      *) echo "Enter password or ssh-key." >&2 ;;
+    esac
+  done
+}
+
 prompt_bool() {
   local label="$1" default="${2:-false}" value
   while true; do
@@ -218,6 +242,18 @@ validate_bool() {
   esac
 }
 
+infer_auth_method() {
+  if [[ -n "${AUTH_METHOD_ARG}" ]]; then
+    printf '%s\n' "${AUTH_METHOD_ARG}"
+  elif [[ -n "${VM_PASSWORD_ARG}" ]]; then
+    printf '%s\n' "password"
+  elif [[ -n "${SSH_KEY_FILE_ARG}" || -n "${SSH_PUBLIC_KEY_ARG}" ]]; then
+    printf '%s\n' "ssh-key"
+  else
+    prompt_choice "VM login method: password or ssh-key" "password"
+  fi
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -233,7 +269,10 @@ parse_args() {
       --bridge|--bridge=*) BRIDGE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --storage|--storage=*) STORAGE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --snippet-storage|--snippet-storage=*) SNIPPET_STORAGE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --auth-method|--auth-method=*) AUTH_METHOD_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --ssh-key|--ssh-key=*) SSH_KEY_FILE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --ssh-public-key|--ssh-public-key=*) SSH_PUBLIC_KEY_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
+      --password|--password=*) VM_PASSWORD_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --image-url|--image-url=*) IMAGE_URL_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
       --refresh-image) REFRESH_IMAGE_ARG="true"; shift ;;
       --access-mode|--access-mode=*) ACCESS_MODE_ARG="$(arg_value "$1" "${2:-}")"; [[ "$1" == *=* ]] || shift; shift ;;
@@ -275,6 +314,10 @@ parse_args() {
   validate_bool "--smtp-use-tls" "${SMTP_USE_TLS_ARG}"
   validate_bool "--smtp-use-ssl" "${SMTP_USE_SSL_ARG}"
   validate_bool "--yubikey" "${YUBIKEY_ENABLED_ARG}"
+  case "${AUTH_METHOD_ARG}" in
+    ""|password|ssh-key) ;;
+    *) die "--auth-method must be password or ssh-key" ;;
+  esac
   case "${ACCESS_MODE_ARG}" in
     ""|lab-http|tailscale-https|caddy-https) ;;
     *) die "--access-mode must be lab-http, tailscale-https, or caddy-https" ;;
@@ -328,12 +371,14 @@ snippet_path() {
 }
 
 render_template() {
-  local vm_name="$1" bootstrap_b64="$2" psonoctl_b64="$3" output="$4"
+  local vm_name="$1" ssh_pwauth="$2" bootstrap_b64="$3" psonoctl_b64="$4" output="$5"
   awk \
     -v vm_name="${vm_name}" \
+    -v ssh_pwauth="${ssh_pwauth}" \
     -v bootstrap="${bootstrap_b64}" \
     -v psonoctl="${psonoctl_b64}" '
       /__VM_NAME__/ { gsub("__VM_NAME__", vm_name) }
+      /__SSH_PWAUTH__/ { gsub("__SSH_PWAUTH__", ssh_pwauth) }
       /__BOOTSTRAP_B64__/ { print bootstrap; next }
       /__PSONOCTL_B64__/ { print psonoctl; next }
       { print }
@@ -615,7 +660,7 @@ main() {
   [[ -f "${TEMPLATE_FILE}" ]] || die "Missing ${TEMPLATE_FILE}"
   [[ -f "${PSONOCTL_FILE}" ]] || die "Missing ${PSONOCTL_FILE}"
 
-  local vmid vm_name cores memory disk_gb bridge storage snippet_storage ssh_key_file image_url image_dir image_path
+  local vmid vm_name cores memory disk_gb bridge storage snippet_storage auth_method ssh_key_file ssh_public_key vm_password ssh_pwauth image_url image_dir image_path
   vmid="${VMID_ARG:-$(prompt "VMID" "$(next_vmid)")}"
   vm_exists "${vmid}" && die "VMID already exists: ${vmid}"
   vm_name="${VM_NAME_ARG:-$(prompt "VM name" "psono-${vmid}")}"
@@ -628,7 +673,37 @@ main() {
   storage_exists "${storage}" || die "Storage does not exist: ${storage}"
   snippet_storage="${SNIPPET_STORAGE_ARG:-$(prompt "Cloud-init snippets storage" "local")}"
   storage_exists "${snippet_storage}" || die "Snippet storage does not exist: ${snippet_storage}"
-  ssh_key_file="${SSH_KEY_FILE_ARG:-$(prompt "SSH public key file (optional)" "${HOME}/.ssh/id_rsa.pub")}"
+  auth_method="$(infer_auth_method)"
+  ssh_key_file="${SSH_KEY_FILE_ARG}"
+  ssh_public_key="${SSH_PUBLIC_KEY_ARG}"
+  vm_password="${VM_PASSWORD_ARG}"
+  ssh_pwauth="false"
+  case "${auth_method}" in
+    password)
+      if [[ -n "${ssh_key_file}" || -n "${ssh_public_key}" ]]; then
+        die "SSH key options require --auth-method ssh-key"
+      fi
+      [[ -n "${vm_password}" ]] || vm_password="$(prompt_secret_required "Password for psono VM user")"
+      ssh_pwauth="true"
+      ;;
+    ssh-key)
+      if [[ -n "${vm_password}" ]]; then
+        die "--password requires --auth-method password"
+      fi
+      if [[ -n "${ssh_key_file}" && -n "${ssh_public_key}" ]]; then
+        die "Use either --ssh-key or --ssh-public-key, not both"
+      fi
+      if [[ -z "${ssh_key_file}" && -z "${ssh_public_key}" ]]; then
+        ssh_key_file="$(prompt "SSH public key file (blank to paste key)" "")"
+      fi
+      if [[ -z "${ssh_key_file}" && -z "${ssh_public_key}" ]]; then
+        ssh_public_key="$(prompt_required "SSH public key")"
+      fi
+      if [[ -n "${ssh_key_file}" && ! -f "${ssh_key_file}" ]]; then
+        die "SSH public key file does not exist: ${ssh_key_file}"
+      fi
+      ;;
+  esac
   image_url="${IMAGE_URL_ARG:-$(prompt "Debian 13 cloud image URL" "${DEFAULT_IMAGE_URL}")}"
   image_dir="/var/lib/vz/template/qcow2"
   image_path="${image_dir}/$(basename "${image_url}")"
@@ -741,6 +816,11 @@ main() {
   bootstrap_file="${tmpdir}/bootstrap-psono.sh"
   user_data_file="${tmpdir}/user-data.yml"
   user_data_name="psono-${vmid}-user-data.yml"
+  if [[ -n "${ssh_public_key}" ]]; then
+    ssh_key_file="${tmpdir}/ssh-public-key.pub"
+    printf '%s\n' "${ssh_public_key}" >"${ssh_key_file}"
+    chmod 0600 "${ssh_key_file}"
+  fi
 
   make_bootstrap_script "${bootstrap_file}" \
     "$(shell_quote_line ACCESS_MODE "${access_mode}")" \
@@ -773,7 +853,7 @@ main() {
 
   psonoctl_b64="$(b64_file_block "${PSONOCTL_FILE}")"
   bootstrap_b64="$(b64_file_block "${bootstrap_file}")"
-  render_template "${vm_name}" "${bootstrap_b64}" "${psonoctl_b64}" "${user_data_file}"
+  render_template "${vm_name}" "${ssh_pwauth}" "${bootstrap_b64}" "${psonoctl_b64}" "${user_data_file}"
 
   snippet_file="$(snippet_path "${snippet_storage}" "${user_data_name}")"
   mkdir -p "$(dirname "${snippet_file}")"
@@ -806,13 +886,15 @@ main() {
   qm set "${vmid}" --ide2 "${storage}:cloudinit"
   qm set "${vmid}" --boot c --bootdisk scsi0
   qm set "${vmid}" --ciuser psono
+  if [[ -n "${vm_password}" ]]; then
+    info "Installing password login for VM user psono"
+    qm set "${vmid}" --cipassword "${vm_password}"
+  fi
   qm set "${vmid}" --ipconfig0 ip=dhcp
   qm set "${vmid}" --cicustom "user=${snippet_storage}:snippets/${user_data_name}"
   if [[ -f "${ssh_key_file}" ]]; then
     info "Installing SSH public key from ${ssh_key_file}"
     qm set "${vmid}" --sshkeys "${ssh_key_file}"
-  else
-    echo "No SSH key installed. Use the Proxmox console if needed." >&2
   fi
   qm start "${vmid}"
 

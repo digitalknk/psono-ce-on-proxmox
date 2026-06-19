@@ -54,7 +54,9 @@ cd psono-ce-on-proxmox
 bash setup-psono-vm.sh
 ```
 
-The installer asks for the VM ID, storage, network bridge, access mode, and optional features.
+The installer asks for the VM ID, storage, network bridge, VM login method, access mode, and optional features.
+
+By default it asks for a password for the `psono` user and enables password SSH in cloud-init. You can choose SSH key login instead and either provide a public key file or paste the public key when prompted.
 
 Multiple installs on the same Proxmox host are supported. Each install needs its own VMID and VM name. By default the script asks Proxmox for the next VMID and names the VM `psono-<VMID>`.
 
@@ -77,8 +79,18 @@ bash setup-psono-vm.sh \
   --storage local-lvm \
   --snippet-storage local \
   --bridge vmbr0 \
+  --auth-method password \
+  --password 'change-this-password' \
   --access-mode lab-http \
   --backup-mode none
+```
+
+SSH key example:
+
+```bash
+bash setup-psono-vm.sh \
+  --auth-method ssh-key \
+  --ssh-key /root/.ssh/id_rsa.pub
 ```
 
 Tailscale tailnet-only example:
@@ -261,4 +273,5 @@ s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<bucket>/<prefix>
 - The VM gets its first IP from DHCP.
 - The installer downloads the Debian 13 cloud image from Debian's cloud image mirror.
 - Lab HTTP is useful for checking that the install works, but it is not the recommended long-term access mode.
+- VM login uses the `psono` user.
 - Store the restic password and S3/R2 credentials somewhere safe. They are written in the VM under `/root/.config/psono-installer/` with root-only permissions.
