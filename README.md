@@ -279,6 +279,21 @@ sudo psonoctl update --with-postgres
 sudo psonoctl postgres-upgrade --target-major 19
 ```
 
+## Enable Fileserver On An Existing VM
+
+After updating `/usr/local/sbin/psonoctl`, run:
+
+```bash
+sudo psonoctl backup
+sudo psonoctl config
+sudo psonoctl fileserver-test
+sudo psonoctl doctor
+```
+
+In `psonoctl config`, enable the fileserver, keep storage as `local`, use `/fileserver` for the path, and keep the default shard directory unless you already planned a separate data disk.
+
+For `lab-http` installs with hardening enabled, run `sudo psonoctl harden` after enabling the fileserver so the firewall also opens `10300/tcp`. Caddy and Tailscale installs refresh their `/fileserver` route during `psonoctl config`.
+
 ## Updates
 
 Update Psono:
