@@ -688,7 +688,7 @@ EOF_TAILSCALE_SERVICE
 
 main() {
   apt-get update
-  apt-get install -y ca-certificates curl gnupg jq kmod lsb-release openssl qemu-guest-agent rsync tar
+  apt-get install -y ca-certificates curl gnupg jq kmod lsb-release openssl qemu-guest-agent rsync sudo tar
   systemctl enable --now qemu-guest-agent
   install_docker
   configure_access

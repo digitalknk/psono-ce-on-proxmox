@@ -2,26 +2,12 @@
 hostname: __VM_NAME__
 manage_etc_hosts: true
 ssh_pwauth: __SSH_PWAUTH__
-package_update: true
-package_upgrade: true
 
 users:
   - default
 __PSONO_USER_BLOCK__
 
 __CHPASSWD_BLOCK__
-
-packages:
-  - ca-certificates
-  - curl
-  - gnupg
-  - jq
-  - lsb-release
-  - openssl
-  - qemu-guest-agent
-  - rsync
-  - sudo
-  - tar
 
 write_files:
   - path: /root/bootstrap-psono.b64
