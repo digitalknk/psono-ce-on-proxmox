@@ -28,6 +28,8 @@ Common commands:
   logs [-f]                      Show Psono/Postgres logs
   restart                        Restart Psono and Postgres
   config                         Re-run the CE config wizard
+  create-user                    Create a Psono user
+  promote-user                   Promote a Psono user role
   backup                         Dump Postgres and save config files
   update                         Update Psono image, migrate DB, restart
 
@@ -38,6 +40,8 @@ Lifecycle:
 
 Configuration:
   config                         Edit public URL, SMTP, YubiKey, registration
+  create-user <username> <email> Create a Psono user and prompt for password
+  promote-user <username> <role> Promote a user, for example superuser
   test-email <address>           Send a Psono test email using current SMTP config
 
 Backup and restore:
@@ -61,6 +65,8 @@ Examples:
   psonoctl status
   psonoctl logs -f
   psonoctl config
+  psonoctl create-user username@example.com user@example.com
+  psonoctl promote-user username@example.com superuser
   psonoctl test-email admin@example.com
   psonoctl backup
   psonoctl update
@@ -206,6 +212,27 @@ Runs Psono's sendtestmail command through Docker Compose.
 
 Example:
   psonoctl test-email admin@example.com
+USAGE
+      ;;
+    create-user)
+      cat <<'USAGE'
+psonoctl create-user <username> <email>
+
+Creates a Psono user through Docker Compose and prompts for the password
+without putting it in shell history.
+
+Example:
+  psonoctl create-user username@example.com user@example.com
+USAGE
+      ;;
+    promote-user)
+      cat <<'USAGE'
+psonoctl promote-user <username> <role>
+
+Promotes a Psono user through Docker Compose.
+
+Example:
+  psonoctl promote-user username@example.com superuser
 USAGE
       ;;
     ""|-h|--help|help)
@@ -786,6 +813,24 @@ test_email_cmd() {
   compose run --rm psono-combo python3 ./psono/manage.py sendtestmail "${target}"
 }
 
+create_user_cmd() {
+  require_install
+  local username="${1:-}" email="${2:-}" password
+  [[ -n "${username}" ]] || die "create-user requires a username"
+  [[ -n "${email}" ]] || die "create-user requires an email address"
+  password="$(prompt_secret "Password for ${username}")"
+  [[ -n "${password}" ]] || die "Password is required"
+  compose run --rm psono-combo python3 ./psono/manage.py createuser "${username}" "${password}" "${email}"
+}
+
+promote_user_cmd() {
+  require_install
+  local username="${1:-}" role="${2:-}"
+  [[ -n "${username}" ]] || die "promote-user requires a username"
+  [[ -n "${role}" ]] || die "promote-user requires a role, for example superuser"
+  compose run --rm psono-combo python3 ./psono/manage.py promoteuser "${username}" "${role}"
+}
+
 bootstrap_cmd() {
   require_root
   render_config
@@ -812,6 +857,8 @@ main() {
     restart) restart_cmd "$@" ;;
     logs) logs_cmd "$@" ;;
     config) config_cmd "$@" ;;
+    create-user) create_user_cmd "$@" ;;
+    promote-user) promote_user_cmd "$@" ;;
     test-email) test_email_cmd "$@" ;;
     backup) backup_cmd "$@" ;;
     restore) restore_cmd "$@" ;;
