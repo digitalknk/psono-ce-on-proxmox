@@ -998,9 +998,58 @@ prompt_bool() {
 write_install_env() {
   : >"${INSTALL_ENV}"
   chmod 0600 "${INSTALL_ENV}"
-  for key in ACCESS_MODE PUBLIC_URL ALLOWED_DOMAIN VM_AUTH_METHOD HARDENING_PROFILE SSH_EXPOSURE TAILSCALE_SSH FILESERVER_ENABLED FILESERVER_STORAGE FILESERVER_PATH FILESERVER_SHARD_DIR FILESERVER_CLUSTER_ID FILESERVER_SHARD_ID ALLOW_REGISTRATION SMTP_ENABLED SMTP_EMAIL_FROM SMTP_HOST SMTP_HOST_USER SMTP_HOST_PASSWORD SMTP_PORT SMTP_USE_TLS SMTP_USE_SSL SMTP_TIMEOUT YUBIKEY_ENABLED YUBIKEY_CLIENT_ID YUBIKEY_SECRET_KEY; do
+  for key in ACCESS_MODE PUBLIC_URL ALLOWED_DOMAIN VM_AUTH_METHOD HARDENING_PROFILE SSH_EXPOSURE TAILSCALE_SSH TAILSCALE_EXPOSURE CADDY_DOMAIN CADDY_EMAIL FILESERVER_ENABLED FILESERVER_STORAGE FILESERVER_PATH FILESERVER_SHARD_DIR FILESERVER_CLUSTER_ID FILESERVER_SHARD_ID ALLOW_REGISTRATION SMTP_ENABLED SMTP_EMAIL_FROM SMTP_HOST SMTP_HOST_USER SMTP_HOST_PASSWORD SMTP_PORT SMTP_USE_TLS SMTP_USE_SSL SMTP_TIMEOUT YUBIKEY_ENABLED YUBIKEY_CLIENT_ID YUBIKEY_SECRET_KEY; do
     printf "%s=%q\n" "${key}" "${!key:-}" >>"${INSTALL_ENV}"
   done
+}
+
+configure_fileserver_access() {
+  fileserver_enabled || return 0
+  case "${ACCESS_MODE:-lab-http}" in
+    caddy-https)
+      command -v caddy >/dev/null 2>&1 || return 0
+      [[ -f /etc/caddy/Caddyfile ]] || return 0
+      if ! grep -q '127\.0\.0\.1:10300' /etc/caddy/Caddyfile; then
+        local tmp
+        tmp="$(mktemp)"
+        awk -v path="${FILESERVER_PATH:-/fileserver}" '
+          function print_route(indent) {
+            print indent "handle_path " path "* {"
+            print indent "  reverse_proxy 127.0.0.1:10300"
+            print indent "}"
+          }
+          !inserted && /^[[:space:]]*handle[[:space:]]*\{[[:space:]]*$/ {
+            indent=$0
+            sub(/[^[:space:]].*$/, "", indent)
+            print_route(indent)
+            inserted=1
+          }
+          !inserted && /^[[:space:]]*reverse_proxy[[:space:]]+127\.0\.0\.1:10200[[:space:]]*$/ {
+            indent=$0
+            sub(/[^[:space:]].*$/, "", indent)
+            print_route(indent)
+            print indent "handle {"
+            print indent "  reverse_proxy 127.0.0.1:10200"
+            print indent "}"
+            inserted=1
+            next
+          }
+          { print }
+        ' /etc/caddy/Caddyfile >"${tmp}"
+        install -m 0644 "${tmp}" /etc/caddy/Caddyfile
+        rm -f "${tmp}"
+      fi
+      systemctl reload caddy >/dev/null 2>&1 || true
+      ;;
+    tailscale-https)
+      command -v tailscale >/dev/null 2>&1 || return 0
+      if [[ "${TAILSCALE_EXPOSURE:-serve}" == "funnel" ]]; then
+        tailscale funnel --bg --https=443 --set-path="${FILESERVER_PATH:-/fileserver}" http://127.0.0.1:10300
+      else
+        tailscale serve --bg --https=443 --set-path="${FILESERVER_PATH:-/fileserver}" http://127.0.0.1:10300
+      fi
+      ;;
+  esac
 }
 
 set_install_env_value() {
@@ -1057,6 +1106,7 @@ config_cmd() {
     migrate
     compose up -d psono-combo
     bootstrap_fileserver
+    configure_fileserver_access
   fi
   compose up -d
   health_cmd
