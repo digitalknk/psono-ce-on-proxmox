@@ -345,12 +345,9 @@ indent_block() {
   sed 's/^/      /'
 }
 
-b64_file_block() {
-  base64 -w 0 "$1" | fold -w 76 | indent_block
-}
-
-b64_string_block() {
-  base64 -w 0 | fold -w 76 | indent_block
+write_b64_file_block() {
+  local input="$1" output="$2"
+  base64 -w 0 "${input}" | fold -w 76 | indent_block >"${output}"
 }
 
 next_vmid() {
@@ -374,19 +371,76 @@ snippet_path() {
   pvesm path "${storage}:snippets/${file}"
 }
 
+yaml_quote() {
+  local value
+  value="$(printf '%s' "$1" | sed "s/'/''/g")"
+  printf "'%s'" "${value}"
+}
+
+render_psono_user_block() {
+  local lock_passwd="$1" ssh_public_key="$2"
+  cat <<EOF_USER
+  - name: psono
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: ${lock_passwd}
+EOF_USER
+  if [[ -n "${ssh_public_key}" ]]; then
+    echo "    ssh_authorized_keys:"
+    while IFS= read -r key_line; do
+      [[ -n "${key_line}" ]] || continue
+      printf '      - %s\n' "$(yaml_quote "${key_line}")"
+    done <<<"${ssh_public_key}"
+  fi
+}
+
+render_chpasswd_block() {
+  local vm_password="$1"
+  if [[ -z "${vm_password}" ]]; then
+    echo "# Password login disabled for psono user"
+    return
+  fi
+  cat <<EOF_PASSWORD
+chpasswd:
+  expire: false
+  users:
+    - name: psono
+      password: $(yaml_quote "${vm_password}")
+      type: text
+EOF_PASSWORD
+}
+
 render_template() {
-  local vm_name="$1" ssh_pwauth="$2" bootstrap_b64="$3" psonoctl_b64="$4" output="$5"
-  awk \
-    -v vm_name="${vm_name}" \
-    -v ssh_pwauth="${ssh_pwauth}" \
-    -v bootstrap="${bootstrap_b64}" \
-    -v psonoctl="${psonoctl_b64}" '
-      /__VM_NAME__/ { gsub("__VM_NAME__", vm_name) }
-      /__SSH_PWAUTH__/ { gsub("__SSH_PWAUTH__", ssh_pwauth) }
-      /__BOOTSTRAP_B64__/ { print bootstrap; next }
-      /__PSONOCTL_B64__/ { print psonoctl; next }
-      { print }
-    ' "${TEMPLATE_FILE}" >"${output}"
+  local vm_name="$1" ssh_pwauth="$2" psono_user_block_file="$3" chpasswd_block_file="$4" bootstrap_b64_file="$5" psonoctl_b64_file="$6" output="$7" line
+  : >"${output}"
+  while IFS= read -r line; do
+    case "${line}" in
+      *__VM_NAME__*)
+        line="${line//__VM_NAME__/${vm_name}}"
+        printf '%s\n' "${line}" >>"${output}"
+        ;;
+      *__SSH_PWAUTH__*)
+        line="${line//__SSH_PWAUTH__/${ssh_pwauth}}"
+        printf '%s\n' "${line}" >>"${output}"
+        ;;
+      __PSONO_USER_BLOCK__)
+        cat "${psono_user_block_file}" >>"${output}"
+        ;;
+      __CHPASSWD_BLOCK__)
+        cat "${chpasswd_block_file}" >>"${output}"
+        ;;
+      __BOOTSTRAP_B64__)
+        cat "${bootstrap_b64_file}" >>"${output}"
+        ;;
+      __PSONOCTL_B64__)
+        cat "${psonoctl_b64_file}" >>"${output}"
+        ;;
+      *)
+        printf '%s\n' "${line}" >>"${output}"
+        ;;
+    esac
+  done <"${TEMPLATE_FILE}"
 }
 
 download_image() {
@@ -712,6 +766,9 @@ main() {
       if [[ -n "${ssh_key_file}" && ! -f "${ssh_key_file}" ]]; then
         die "SSH public key file does not exist: ${ssh_key_file}"
       fi
+      if [[ -n "${ssh_key_file}" ]]; then
+        ssh_public_key="$(cat "${ssh_key_file}")"
+      fi
       ;;
   esac
   image_url="${IMAGE_URL_ARG:-$(prompt "Debian 13 cloud image URL" "${DEFAULT_IMAGE_URL}")}"
@@ -823,16 +880,15 @@ main() {
     *) die "Unknown backup mode: ${backup_mode}" ;;
   esac
 
-  local tmpdir bootstrap_file user_data_file user_data_name psonoctl_b64 bootstrap_b64 snippet_file
+  local tmpdir bootstrap_file user_data_file user_data_name psonoctl_b64_file bootstrap_b64_file psono_user_block_file chpasswd_block_file snippet_file
   tmpdir="$(mktemp -d)"
   bootstrap_file="${tmpdir}/bootstrap-psono.sh"
   user_data_file="${tmpdir}/user-data.yml"
   user_data_name="psono-${vmid}-user-data.yml"
-  if [[ -n "${ssh_public_key}" ]]; then
-    ssh_key_file="${tmpdir}/ssh-public-key.pub"
-    printf '%s\n' "${ssh_public_key}" >"${ssh_key_file}"
-    chmod 0600 "${ssh_key_file}"
-  fi
+  psonoctl_b64_file="${tmpdir}/psonoctl.b64"
+  bootstrap_b64_file="${tmpdir}/bootstrap.b64"
+  psono_user_block_file="${tmpdir}/psono-user.yml"
+  chpasswd_block_file="${tmpdir}/chpasswd.yml"
 
   make_bootstrap_script "${bootstrap_file}" \
     "$(shell_quote_line ACCESS_MODE "${access_mode}")" \
@@ -864,9 +920,15 @@ main() {
     "$(shell_quote_line AWS_SECRET_ACCESS_KEY "${aws_secret_access_key}")" \
     "$(shell_quote_line AWS_DEFAULT_REGION "${aws_default_region}")"
 
-  psonoctl_b64="$(b64_file_block "${PSONOCTL_FILE}")"
-  bootstrap_b64="$(b64_file_block "${bootstrap_file}")"
-  render_template "${vm_name}" "${ssh_pwauth}" "${bootstrap_b64}" "${psonoctl_b64}" "${user_data_file}"
+  write_b64_file_block "${PSONOCTL_FILE}" "${psonoctl_b64_file}"
+  write_b64_file_block "${bootstrap_file}" "${bootstrap_b64_file}"
+  if [[ "${auth_method}" == "password" ]]; then
+    render_psono_user_block "false" "" >"${psono_user_block_file}"
+  else
+    render_psono_user_block "true" "${ssh_public_key}" >"${psono_user_block_file}"
+  fi
+  render_chpasswd_block "${vm_password}" >"${chpasswd_block_file}"
+  render_template "${vm_name}" "${ssh_pwauth}" "${psono_user_block_file}" "${chpasswd_block_file}" "${bootstrap_b64_file}" "${psonoctl_b64_file}" "${user_data_file}"
 
   snippet_file="$(snippet_path "${snippet_storage}" "${user_data_name}")"
   mkdir -p "$(dirname "${snippet_file}")"
@@ -898,17 +960,8 @@ main() {
   qm disk resize "${vmid}" scsi0 "${disk_gb}G"
   qm set "${vmid}" --ide2 "${storage}:cloudinit"
   qm set "${vmid}" --boot c --bootdisk scsi0
-  qm set "${vmid}" --ciuser psono
-  if [[ -n "${vm_password}" ]]; then
-    info "Installing password login for VM user psono"
-    qm set "${vmid}" --cipassword "${vm_password}"
-  fi
   qm set "${vmid}" --ipconfig0 ip=dhcp
   qm set "${vmid}" --cicustom "user=${snippet_storage}:snippets/${user_data_name}"
-  if [[ -f "${ssh_key_file}" ]]; then
-    info "Installing SSH public key from ${ssh_key_file}"
-    qm set "${vmid}" --sshkeys "${ssh_key_file}"
-  fi
   qm start "${vmid}"
 
   info "VM started. Cloud-init will install Psono in the guest."

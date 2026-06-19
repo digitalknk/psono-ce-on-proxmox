@@ -58,6 +58,8 @@ The installer asks for the VM ID, storage, network bridge, VM login method, acce
 
 By default it asks for a password for the `psono` user and enables password SSH in cloud-init. You can choose SSH key login instead and either provide a public key file or paste the public key when prompted.
 
+The login is rendered into the custom cloud-init user-data used by this installer.
+
 Multiple installs on the same Proxmox host are supported. Each install needs its own VMID and VM name. By default the script asks Proxmox for the next VMID and names the VM `psono-<VMID>`.
 
 The Debian cloud image is cached under:
