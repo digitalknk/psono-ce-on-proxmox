@@ -15,17 +15,18 @@ write_files:
     permissions: "0600"
     content: |
 __BOOTSTRAP_B64__
-  - path: /usr/local/sbin/psonoctl
+  - path: /root/psonoctl.b64
     owner: root:root
-    permissions: "0755"
-    encoding: b64
+    permissions: "0600"
     content: |
 __PSONOCTL_B64__
 
 runcmd:
   - [systemctl, enable, --now, qemu-guest-agent]
-  - [bash, -lc, "base64 -d /root/bootstrap-psono.b64 > /root/bootstrap-psono.sh"]
+  - [bash, -lc, "tr -d '[:space:]' < /root/bootstrap-psono.b64 | base64 -d > /root/bootstrap-psono.sh"]
+  - [bash, -lc, "tr -d '[:space:]' < /root/psonoctl.b64 | base64 -d > /usr/local/sbin/psonoctl"]
   - [chmod, "0700", /root/bootstrap-psono.sh]
+  - [chmod, "0755", /usr/local/sbin/psonoctl]
   - [bash, /root/bootstrap-psono.sh]
 
 final_message: "Psono bootstrap finished. Check /var/log/psono-bootstrap.log and run: sudo psonoctl status"
