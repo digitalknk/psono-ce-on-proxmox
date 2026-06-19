@@ -31,19 +31,29 @@ The host needs:
 
 ## Install
 
-From a checkout of this repository on the Proxmox host:
+Run this on the Proxmox host:
 
 ```bash
-bash setup-psono-vm.sh
+PSONO_INSTALLER_BASE_URL="https://raw.githubusercontent.com/digitalknk/psono-ce-on-proxmox/main" \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/digitalknk/psono-ce-on-proxmox/main/setup-psono-vm.sh)"
 ```
-
-The installer asks for the VM ID, storage, network bridge, access mode, and optional features.
 
 To print help without creating anything:
 
 ```bash
-bash setup-psono-vm.sh --help
+PSONO_INSTALLER_BASE_URL="https://raw.githubusercontent.com/digitalknk/psono-ce-on-proxmox/main" \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/digitalknk/psono-ce-on-proxmox/main/setup-psono-vm.sh)" _ --help
 ```
+
+From a checkout instead:
+
+```bash
+git clone https://github.com/digitalknk/psono-ce-on-proxmox.git
+cd psono-ce-on-proxmox
+bash setup-psono-vm.sh
+```
+
+The installer asks for the VM ID, storage, network bridge, access mode, and optional features.
 
 Most prompts can be prefilled with flags. For example:
 
